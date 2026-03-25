@@ -1,0 +1,3859 @@
+<!DOCTYPE html>
+<html lang="es">
+<!--
+  ============================================================
+  DASHBOARD METEOROLÓGICO — MADROÑO (Madroño)
+  ============================================================
+  Dashboard meteorológico — Madroño
+  Creado: Marzo 2026
+
+  ESTRUCTURA DEL ARCHIVO
+  ──────────────────────
+  1. <head>          → Metadatos, Chart.js CDN, estilos CSS
+  2. <body>
+     2.1  .top-grid  → Tarjetas superiores (viento, temperatura, estadísticas)
+     2.2  .zoom-bar  → Botones de zoom sincronizado para los gráficos
+     2.3  Charts     → Tres canvas: velocidad, dirección, precipitación
+     2.4  #tbl15     → Tabla horizontal: promedios cada 15 min (hoy)
+     2.5  #tblH      → Tabla horizontal: promedios por hora (48h)
+  3. <script>
+     3.1  Datos        → Arrays data15 (15 min), dataH (horario), allHourly (gráficos)
+     3.2  arrowSvg()   → Genera flecha SVG de dirección del viento
+     3.3  buildHTable()→ Construye tablas en formato horizontal (filas=métricas, columnas=tiempo)
+     3.4  buildCharts()→ Inicializa los tres gráficos Chart.js
+     3.5  setZoom()    → Actualiza los tres gráficos al cambiar el zoom
+
+  DEPENDENCIAS EXTERNAS
+  ──────────────────────
+  - Chart.js 4.4.1 (cdnjs.cloudflare.com) — solo para los gráficos
+  - Sin frameworks, sin build tools, sin servidor necesario
+  - Funciona abriendo el archivo directamente en el navegador
+
+  DATOS
+  ──────────────────────
+  Los datos son estáticos (capturados el 22 Mar 2026).
+  Para conectar a datos en tiempo real, sustituir los arrays
+  data15 y dataH por llamadas fetch() a la API de estación meteorológica:
+    https://api.estacion.com/live/?s=STATION_ID&pw=PASSWORD&m=JSON
+  ============================================================
+-->
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Madroño — Estación meteorológica</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#1D9E75">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Madroño">
+  <link rel="apple-touch-icon" href="icon-192.png">
+
+  <!-- Chart.js: librería para los tres gráficos de línea/barra -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+
+  <style>
+    /* ============================================================
+       RESET Y VARIABLES CSS
+       ============================================================
+       Se usan variables CSS para todos los colores y radios.
+       El bloque @media dark invierte automáticamente los colores
+       para modo oscuro sin necesitar JavaScript adicional.
+       ============================================================ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      /* Fondos */
+      --bg-primary:    #ffffff;    /* tarjetas y superficies principales */
+      --bg-secondary:  #f5f5f4;    /* fondo de página y cabeceras de tabla */
+
+      /* Texto */
+      --text-primary:  #1a1a18;    /* texto principal */
+      --text-secondary:#6b6b67;    /* etiquetas, metadatos, cabeceras de fila */
+
+      /* Bordes */
+      --border:        rgba(0,0,0,0.12);   /* borde estándar */
+      --border-hover:  rgba(0,0,0,0.25);   /* borde al hacer hover */
+
+      /* Radios de borde */
+      --radius-md: 8px;
+      --radius-lg: 12px;
+
+      /* Colores de datos meteorológicos */
+      --teal:       #1D9E75;   /* velocidad del viento */
+      --orange:     #D85A30;   /* ráfagas */
+      --blue:       #378ADD;   /* dirección del viento */
+      --blue-pale:  #85B7EB;   /* precipitación (barras) */
+      --blue-deep:  #185FA5;   /* enlaces y columnas Sat/Sun */
+
+      /* Colores del botón de zoom activo */
+      --green-bg:     #E1F5EE;
+      --green-text:   #0F6E56;
+      --green-border: #5DCAA5;
+    }
+
+    /* Modo oscuro: detectado automáticamente con prefers-color-scheme */
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-primary:    #1e1e1c;
+        --bg-secondary:  #2a2a28;
+        --text-primary:  #e8e8e3;
+        --text-secondary:#9a9a94;
+        --border:        rgba(255,255,255,0.1);
+        --border-hover:  rgba(255,255,255,0.2);
+        --green-bg:      #0a2e20;
+        --green-text:    #5DCAA5;
+        --green-border:  #1D9E75;
+        --blue-deep:     #85B7EB;
+      }
+    }
+
+    /* ============================================================
+       BASE
+       ============================================================ */
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      padding: 24px 16px 48px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .dash        { max-width: 880px; margin: 0 auto; }
+    .station-title { font-size: 24px; font-weight: 500; margin-bottom: 4px; }
+    .unit-label  { font-size: 12px; color: var(--text-secondary); margin-bottom: 16px; }
+
+    /* ============================================================
+       TARJETAS SUPERIORES
+       ============================================================
+       Grid de dos columnas. La tarjeta de viento ocupa las dos
+       columnas con "grid-column: span 2".
+       ============================================================ */
+    .top-grid {
+      display: grid;
+      grid-template-columns: minmax(0,1fr) minmax(0,1fr);
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--bg-primary);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 14px 16px;
+    }
+    .card-label {
+      font-size: 10px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 10px;
+    }
+
+    /* Tarjeta de viento: flex con brújula SVG + velocidad + ráfaga */
+    .wind-main    { display: flex; align-items: center; gap: 14px; }
+    .wind-speed   { font-size: 38px; font-weight: 500; line-height: 1; }
+    .wind-unit    { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+    .wind-dir-lbl { font-size: 17px; font-weight: 500; color: var(--teal); }
+
+    /* Badges de estado rápido bajo la tarjeta de viento */
+    .trend-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .badge {
+      font-size: 11px;
+      background: var(--bg-secondary);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 3px 10px;
+      color: var(--text-secondary);
+    }
+
+    /* Tarjeta de estadísticas: filas separadas por borde inferior */
+    .daily-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 6px 0;
+      border-bottom: 0.5px solid var(--border);
+    }
+    .daily-row:last-child { border-bottom: none; }
+
+    /* Tarjeta de temperatura */
+    .temp-big { font-size: 34px; font-weight: 500; }
+    .temp-r {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 0.5px solid var(--border);
+      font-size: 13px;
+    }
+    .temp-r:last-child { border-bottom: none; }
+
+    /* ============================================================
+       SECCIÓN DE GRÁFICOS
+       ============================================================ */
+    .section-title {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin: 20px 0 6px;
+    }
+
+    /* Leyenda manual — el default de Chart.js está desactivado */
+    .legend       { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 8px; font-size: 12px; color: var(--text-secondary); }
+    .legend span  { display: flex; align-items: center; gap: 5px; }
+    .legend-dot   { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+
+    /*
+      Botones de zoom: cada uno llama a setZoom(this, N).
+      N es cuántos puntos mostrar en los tres gráficos a la vez.
+    */
+    .zoom-bar { display: flex; gap: 6px; margin: 20px 0 0; }
+    .zoom-btn {
+      font-size: 11px;
+      padding: 4px 12px;
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--bg-secondary);
+      cursor: pointer;
+      color: var(--text-secondary);
+      transition: border-color .15s;
+    }
+    .zoom-btn:hover  { border-color: var(--border-hover); }
+    .zoom-btn.active { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
+
+    /*
+      .chart-wrap: contenedor con altura fija y position:relative.
+      Chart.js necesita un padre con height explícita para que
+      responsive:true + maintainAspectRatio:false funcionen correctamente.
+      El canvas nunca debe tener height definida en CSS directamente.
+    */
+    .chart-wrap       { position: relative; width: 100%; height: 160px; margin-bottom: 20px; }
+    .chart-wrap.short { height: 120px; }  /* gráfico de precipitación más compacto */
+
+    /* ============================================================
+       TABLAS HORIZONTALES
+       ============================================================
+       Formato idéntico a estación meteorológica:
+         - FILAS   = métricas (Tiempo, Velocidad, Ráfaga, Dirección, Dir. Deg., Temp.)
+         - COLUMNAS = intervalos de tiempo
+       La primera celda de cada fila (.row-label) es "sticky" para
+       que siempre sea visible al hacer scroll horizontal.
+       ============================================================ */
+    .tbl-wrap {
+      overflow-x: auto;                 /* scroll horizontal en pantallas estrechas */
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg);
+      margin-bottom: 24px;
+    }
+    .htable {
+      border-collapse: collapse;
+      font-size: 12px;
+      white-space: nowrap;              /* evita saltos de línea internos */
+    }
+    .htable td {
+      border: 0.5px solid var(--border);
+      padding: 5px 9px;
+      text-align: center;
+      color: var(--text-primary);
+    }
+    /* Primera columna de cada fila: etiqueta fija al hacer scroll */
+    .htable .row-label {
+      text-align: left;
+      font-weight: 500;
+      background: var(--bg-secondary);
+      color: var(--text-secondary);
+      font-size: 11px;
+      position: sticky;
+      left: 0;
+      z-index: 1;
+      min-width: 120px;
+      padding: 5px 10px;
+    }
+    /* Columnas de hora en punto (08h, 09h…): fondo amarillo */
+    .htable .col-hour { font-weight: 500; background: #FFF9C4; }
+    /* Columnas de día (Sat, Sun): fondo amarillo con texto azul */
+    .htable .col-day  { font-weight: 500; background: #FFF9C4; color: var(--blue-deep); }
+    @media (prefers-color-scheme: dark) {
+      .htable .col-hour { background: #3d3800; }
+      .htable .col-day  { background: #3d3800; }
+    }
+    /* Valores de ráfaga en naranja */
+    .htable .gust     { color: var(--orange); font-weight: 500; }
+    /* Texto de dirección cardinal más pequeño y atenuado */
+    .htable .dir-txt  { font-size: 11px; color: var(--text-secondary); }
+
+    /* ============================================================
+       PIE DE PÁGINA
+       ============================================================ */
+    .meta-row {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }
+    .meta-row a { color: var(--blue-deep); text-decoration: none; }
+    .meta-row a:hover { text-decoration: underline; }
+
+    /* ============================================================
+       ESCALA DE COLOR SEGÚN VIENTO
+       ============================================================ */
+    .wc-calm   { color: #1D9E75; }
+    .wc-light  { color: #4aaa3c; }
+    .wc-mod    { color: #b8a800; }
+    .wc-fresh  { color: #d07a10; }
+    .wc-strong { color: #cc2a2a; }
+    .wc-storm  { color: #7a0000; }
+
+    /* ============================================================
+       TARJETA DE VIENTO — BORDE DINÁMICO + FONDO SUTIL
+       ============================================================ */
+    #wind-card {
+      transition: border-color .6s ease, box-shadow .6s ease;
+    }
+
+    /* ── Pulso "live" permanente en el dot de cabecera ── */
+    @keyframes live-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 var(--live-color, rgba(29,158,117,.6)); }
+      60%       { box-shadow: 0 0 0 5px transparent; }
+    }
+    #status-dot { animation: live-pulse 2.4s ease infinite; }
+
+    /* ============================================================
+       BRÚJULA — AGUJA ANIMADA CON CSS TRANSITION
+       ============================================================
+       La rotación se aplica vía style.transform (no SVG attribute)
+       para que la transición CSS funcione.
+       transform-box:fill-box ancla el transform-origin al centro
+       geométrico del grupo, independientemente del viewBox.
+       ============================================================ */
+    #compass-arrow {
+      transform-box: fill-box;
+      transform-origin: center;
+      transition: transform .7s cubic-bezier(0.34, 1.3, 0.64, 1);
+    }
+    /* La punta también transiciona de color suavemente */
+    #compass-arrow-tip {
+      transition: fill .6s ease;
+    }
+
+    /* ============================================================
+       NÚMERO DE VELOCIDAD — TRANSICIÓN SUAVE
+       ============================================================ */
+    .wind-speed {
+      font-size: 38px; font-weight: 500; line-height: 1;
+      transition: color .5s ease;
+    }
+
+    /* ============================================================
+       RÁFAGA — FLASH VISUAL AL ACTUALIZAR
+       ============================================================ */
+    @keyframes gust-flash {
+      0%   { opacity: 1; }
+      15%  { opacity: .15; transform: scale(.92); }
+      40%  { opacity: 1;  transform: scale(1.06); }
+      70%  { transform: scale(1); }
+      100% { opacity: 1; transform: scale(1); }
+    }
+    .gust-flash { animation: gust-flash .55s ease forwards; }
+
+    /* Envoltorio del número de ráfaga: halo de color para destacar */
+    #gust-halo {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 5px;
+      padding: 4px 10px 4px 8px;
+      border-radius: 8px;
+      border: 1.5px solid transparent;
+      transition: border-color .5s ease, background .5s ease;
+    }
+
+    /* ============================================================
+       BARRA DE RÁFAGA
+       ============================================================ */
+    .gust-bar-wrap {
+      height: 4px;
+      background: var(--bg-secondary);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .gust-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width .6s ease, background .6s ease;
+    }
+
+    /* ============================================================
+       ANIMACIÓN DE RAYAS DE VIENTO
+       ============================================================ */
+    .compass-wrap { position: relative; flex-shrink: 0; }
+    #wind-anim {
+      position: absolute; top: 0; left: 0;
+      pointer-events: none; overflow: hidden; border-radius: 50%;
+      width: 108px; height: 108px;
+    }
+    @keyframes streak {
+      0%   { opacity: 0; transform: translateX(0); }
+      20%  { opacity: .6; }
+      80%  { opacity: .6; }
+      100% { opacity: 0; transform: translateX(var(--streak-dist)); }
+    }
+    .wstreak {
+      position: absolute;
+      height: 1.5px;
+      border-radius: 2px;
+      opacity: 0;
+      transform-origin: left center;
+    }
+
+    /* ============================================================
+       ZONA DE ALERTAS
+       ============================================================ */
+    #alert-zone { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+    .alert-banner {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 14px; border-radius: var(--radius-md);
+      font-size: 12px; font-weight: 500;
+      border: 1px solid transparent;
+      animation: alertFadeIn .3s ease;
+    }
+    .alert-banner.warn   { background:#fff8e1; border-color:#f0c030; color:#7a5c00; }
+    .alert-banner.danger { background:#fdecea; border-color:#e05050; color:#7a1515; }
+    @media (prefers-color-scheme: dark) {
+      .alert-banner.warn   { background:#2e2600; border-color:#c09000; color:#f0c84a; }
+      .alert-banner.danger { background:#2e0808; border-color:#c03030; color:#f07070; }
+    }
+    .alert-icon { font-size: 16px; flex-shrink: 0; }
+    @keyframes alertFadeIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:none; } }
+
+    @keyframes pulse-red {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(200,40,40,.5); }
+      50%       { box-shadow: 0 0 0 5px rgba(200,40,40,0); }
+    }
+    .pulse-alert { animation: pulse-red 1.4s ease infinite !important; background: #cc2a2a !important; }
+
+    /* ============================================================
+       BADGE DE TENDENCIA
+       ============================================================ */
+    .badge-tend {
+      font-size: 11px; border-radius: var(--radius-md);
+      padding: 3px 10px; border: 0.5px solid transparent; font-weight: 500;
+    }
+    .badge-tend.up   { background:#e6f9f1; border-color:#5DCAA5; color:#0F6E56; }
+    .badge-tend.down { background:#fff0ea; border-color:#e09070; color:#8a3010; }
+    .badge-tend.flat { background:var(--bg-secondary); border-color:var(--border); color:var(--text-secondary); }
+    @media (prefers-color-scheme: dark) {
+      .badge-tend.up   { background:#0a2e20; border-color:#1D9E75; color:#5DCAA5; }
+      .badge-tend.down { background:#2e1000; border-color:#D85A30; color:#e09070; }
+    }
+  </style>
+</head>
+
+<body>
+<div class="dash">
+
+  <!-- ============================================================
+       CABECERA: nombre de la estación y descripción
+       ============================================================ -->
+  <div class="station-title">Madroño</div>
+  <div class="unit-label">Estación meteorológica · datos en tiempo real</div>
+  <div style="font-size:13px; font-weight:600; color:var(--text-primary); margin-bottom:16px; display:flex; align-items:center; gap:6px;">
+    <span id="status-dot" style="width:7px;height:7px;border-radius:50%;background:#1D9E75;display:inline-block;flex-shrink:0;transition:background .3s;"></span>
+    <span id="last-update-ts"></span>
+  </div>
+
+  <!-- Zona de alertas dinámicas — se llena desde JS -->
+  <div id="alert-zone"></div>
+
+  <!-- ============================================================
+       MODO PILOTO — bloque de decisión de vuelo
+       ZONA A (arriba): lectura en 2 segundos — operativa
+       ZONA B (abajo): métricas técnicas para el piloto experto
+       ============================================================ -->
+  <div id="pilot-panel" style="
+    margin-bottom: 16px;
+    border-radius: var(--radius-lg);
+    border: 2px solid var(--border);
+    overflow: hidden;
+    transition: border-color .5s, background .5s;
+  ">
+
+    <!-- ── ZONA A: Decisión operativa (2 segundos) ── -->
+    <div id="pilot-zone-a" style="
+      padding: 16px 18px 14px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      transition: background .5s;
+    ">
+      <!-- Visto bueno grande -->
+      <div style="display:flex; align-items:center; gap:10px; flex-shrink:0;">
+        <div id="ps-icon"  style="font-size:44px; line-height:1;">—</div>
+        <div>
+          <div id="ps-label" style="font-size:20px; font-weight:700; line-height:1.1; letter-spacing:-.01em;">—</div>
+          <div id="ps-type-line" style="font-size:13px; color:var(--text-secondary); margin-top:3px;">—</div>
+        </div>
+      </div>
+
+      <!-- Separador -->
+      <div style="width:1px; background:var(--border); align-self:stretch; margin:0 4px;"></div>
+
+      <!-- Tres métricas operativas clave -->
+      <div style="display:flex; gap:20px; flex-wrap:wrap;">
+        <div>
+          <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Viento útil</div>
+          <div id="op-useful" style="font-size:18px; font-weight:700; line-height:1.2;"
+               title="Viento útil = parte del viento que viene alineado con la ladera">—</div>
+        </div>
+        <div>
+          <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Ráfagas</div>
+          <div id="op-gusts"  style="font-size:18px; font-weight:700; line-height:1.2;">—</div>
+        </div>
+        <div>
+          <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Tendencia</div>
+          <div id="op-trend"  style="font-size:18px; font-weight:700; line-height:1.2;">—</div>
+        </div>
+      </div>
+
+      <!-- Score -->
+      <div style="margin-left:auto; text-align:right; flex-shrink:0;">
+        <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Score</div>
+        <div id="ps-score" style="font-size:22px; font-weight:700;">—</div>
+      </div>
+    </div>
+
+    <!-- ── ZONA B: Métricas técnicas (colapsable) ── -->
+    <details style="border-top: 0.5px solid var(--border);">
+      <summary style="
+        padding: 8px 18px;
+        font-size: 11px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        list-style: none;
+        user-select: none;
+      ">▸ Detalle técnico</summary>
+
+      <div style="padding: 12px 18px 14px; display:grid;
+                  grid-template-columns: repeat(auto-fill, minmax(130px,1fr));
+                  gap:10px 20px;">
+        <div>
+          <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Viento útil</div>
+          <div id="ps-useful"  style="font-size:14px; font-weight:600;"
+               title="Viento útil = parte del viento que viene alineado con la ladera">—</div>
+        </div>
+        <div>
+          <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Ráfagas</div>
+          <div id="ps-gusts"   style="font-size:14px; font-weight:600;">—</div>
+        </div>
+        <div>
+          <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Dirección</div>
+          <div id="ps-dir"     style="font-size:14px; font-weight:600;">—</div>
+        </div>
+        <div>
+          <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Turbulencia</div>
+          <div id="ps-turb"    style="font-size:14px; font-weight:600;">—</div>
+        </div>
+        <div>
+          <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Ciclo</div>
+          <div id="ps-cycle"   style="font-size:14px; font-weight:600;">—</div>
+        </div>
+        <div>
+          <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Cizalladura</div>
+          <div id="ps-shear"   style="font-size:14px; font-weight:600;">—</div>
+        </div>
+        <div>
+          <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.06em;">Tipo de vuelo</div>
+          <div id="ps-flight-type" style="font-size:14px; font-weight:600;">—</div>
+        </div>
+      </div>
+
+      <!-- Análisis específico de sitio -->
+      <div id="site-analysis" style="
+        margin: 0 18px 14px;
+        padding-top: 10px;
+        border-top: 0.5px solid var(--border);
+        display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+      ">
+        <div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase;
+                    letter-spacing:.06em; white-space:nowrap;">Madroño</div>
+        <div id="site-phase-badge"
+             style="font-size:12px; font-weight:600; padding:3px 12px;
+                    border-radius:var(--radius-md); border:1px solid transparent;">—</div>
+        <div id="site-phase-desc"
+             style="font-size:12px; color:var(--text-secondary);">—</div>
+      </div>
+    </details>
+  </div>
+
+
+  <!-- ============================================================
+       SECCIÓN 1: TARJETAS DE ESTADO ACTUAL
+       ============================================================
+       Grid de 2 columnas:
+         - Fila superior (span 2): viento actual con brújula SVG
+         - Col. izquierda: temperatura actual + mín/máx del día
+         - Col. derecha:   estadísticas resumen del día
+       ============================================================ -->
+  <div class="top-grid">
+
+    <!-- TARJETA: VIENTO ACTUAL — ocupa las dos columnas -->
+    <div id="wind-card" class="card" style="grid-column: span 2;">
+      <div class="card-label">Viento actual</div>
+
+      <div class="wind-main">
+
+        <!-- ── ROSA DE LOS VIENTOS + ANIMACIÓN ── -->
+        <div class="compass-wrap">
+          <svg id="compass-svg"
+               width="108" height="108" viewBox="0 0 108 108"
+               xmlns="http://www.w3.org/2000/svg"
+               aria-label="Rosa de los vientos">
+
+            <!-- Fondo -->
+            <circle cx="54" cy="54" r="52" fill="var(--bg-secondary)" stroke="var(--border)" stroke-width="1"/>
+            <!-- Anillo interior punteado -->
+            <circle cx="54" cy="54" r="34" fill="none" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>
+
+            <!-- Ejes de los 8 rumbos -->
+            <g stroke="var(--border)" stroke-width="0.6">
+              <line x1="54" y1="4"  x2="54" y2="104"/>
+              <line x1="4"  y1="54" x2="104" y2="54"/>
+              <line x1="17" y1="17" x2="91" y2="91"/>
+              <line x1="91" y1="17" x2="17" y2="91"/>
+            </g>
+
+            <!-- Puntas cardinales fijas (decorativas, NO rotan) -->
+            <!-- Norte: relleno para distinguirla visualmente -->
+            <polygon points="54,4 51,22 54,18 57,22" fill="var(--border)"/>
+            <!-- Sur -->
+            <polygon points="54,104 51,86 54,90 57,86" fill="var(--border)" opacity="0.5"/>
+            <!-- Este -->
+            <polygon points="104,54 86,51 90,54 86,57" fill="var(--border)" opacity="0.5"/>
+            <!-- Oeste -->
+            <polygon points="4,54 22,51 18,54 22,57" fill="var(--border)" opacity="0.5"/>
+
+            <!-- Puntas intercardinals fijas (más cortas) -->
+            <polygon points="91,17 78,30 80,27 83,30" fill="var(--border)" opacity="0.3"/>
+            <polygon points="91,91 78,78 83,78 80,81" fill="var(--border)" opacity="0.3"/>
+            <polygon points="17,91 30,78 30,81 27,78" fill="var(--border)" opacity="0.3"/>
+            <polygon points="17,17 30,30 27,30 30,27" fill="var(--border)" opacity="0.3"/>
+
+            <!-- Etiquetas cardinales -->
+            <text x="54" y="13"  text-anchor="middle" font-size="9" font-weight="700" fill="var(--text-primary)">N</text>
+            <text x="54" y="103" text-anchor="middle" font-size="8" fill="var(--text-secondary)">S</text>
+            <text x="7"  y="57"  text-anchor="middle" font-size="8" fill="var(--text-secondary)">O</text>
+            <text x="101" y="57" text-anchor="middle" font-size="8" fill="var(--text-secondary)">E</text>
+            <!-- Intercardinals -->
+            <text x="88" y="22"  text-anchor="middle" font-size="7" fill="var(--text-secondary)" opacity="0.65">NE</text>
+            <text x="88" y="90"  text-anchor="middle" font-size="7" fill="var(--text-secondary)" opacity="0.65">SE</text>
+            <text x="20" y="90"  text-anchor="middle" font-size="7" fill="var(--text-secondary)" opacity="0.65">SO</text>
+            <text x="20" y="22"  text-anchor="middle" font-size="7" fill="var(--text-secondary)" opacity="0.65">NO</text>
+
+            <!-- Aguja dinámica — rota con smoothDir() desde JS -->
+            <g id="compass-arrow">
+              <!-- Punta norte: flecha de vane clásica -->
+              <polygon points="54,8 50,38 54,31 58,38" id="compass-arrow-tip" fill="#1D9E75"/>
+              <!-- Cola sur -->
+              <polygon points="54,100 50,70 54,77 58,70" fill="var(--text-secondary)" opacity="0.28"/>
+            </g>
+
+            <!-- Pivote central doble anillo -->
+            <circle cx="54" cy="54" r="6" fill="var(--bg-primary)" stroke="var(--border)" stroke-width="1"/>
+            <circle cx="54" cy="54" r="2.5" fill="var(--text-primary)"/>
+          </svg>
+
+          <div id="wind-anim" style="width:108px;height:108px;"></div>
+        </div>
+
+        <!-- ── Velocidad + Dirección ── -->
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <div style="font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.05em;">Velocidad</div>
+          <div style="display:flex; align-items:baseline; gap:5px;">
+            <span id="cur-speed" class="wind-speed wc-calm">—</span>
+            <span style="font-size:13px; color:var(--text-secondary);">km/h</span>
+          </div>
+          <div id="cur-wind-label" style="font-size:11px; color:var(--text-secondary);">—</div>
+          <div id="cur-dir-lbl" class="wind-dir-lbl">— · —°</div>
+        </div>
+
+        <!-- Separador vertical -->
+        <div style="width:1px; background:var(--border); align-self:stretch; margin:0 4px;"></div>
+
+        <!-- ── Ráfaga ── -->
+        <div style="display:flex; flex-direction:column; gap:4px; min-width:110px;">
+          <div style="font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.05em;">Ráfaga</div>
+          <!-- Halo: el borde+fondo cambian con la intensidad -->
+          <div id="gust-halo">
+            <span id="cur-gust" class="wind-speed wc-calm">—</span>
+            <span style="font-size:13px; color:var(--text-secondary);">km/h</span>
+          </div>
+          <div id="cur-gust-delta" style="font-size:12px; color:var(--text-secondary);">—</div>
+          <div class="gust-bar-wrap">
+            <div id="gust-bar" class="gust-bar-fill" style="width:0%; background:#1D9E75;"></div>
+          </div>
+          <div id="gust-bar-label" style="font-size:10px; color:var(--text-secondary);">— % del máx. diario</div>
+        </div>
+
+      </div><!-- /.wind-main -->
+
+      <!-- Badges de resumen rápido -->
+      <div class="trend-row">
+        <span id="badge-avg15"  class="badge">Promedio 15min: — km/h</span>
+        <span id="badge-max-day" class="badge">Diario máx: — km/h</span>
+        <span id="badge-trend"  class="badge badge-tend flat">—</span>
+      </div>
+    </div>
+
+    <!-- TARJETA: TEMPERATURA ACTUAL -->
+    <div class="card">
+      <div class="card-label">Temperatura</div>
+      <div id="stat-tmp-cur" class="temp-big">— °C</div>
+      <div style="margin-top: 10px;">
+        <div class="temp-r">
+          <span style="color:var(--text-secondary);">Mín. hoy</span>
+          <span id="stat-tmp-min" style="font-weight:500;">— °C</span>
+        </div>
+        <div class="temp-r">
+          <span style="color:var(--text-secondary);">Máx. hoy</span>
+          <span id="stat-tmp-max" style="font-weight:500;">— °C</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- TARJETA: ESTADÍSTICAS DEL DÍA -->
+    <div class="card">
+      <div class="card-label">Estadísticas diarias</div>
+      <div class="daily-row">
+        <span style="font-size:13px; color:var(--text-secondary);">Vel. media</span>
+        <span id="stat-avg-vel" style="font-weight:500;">—</span>
+      </div>
+      <div class="daily-row">
+        <span style="font-size:13px; color:var(--text-secondary);">Vel. máx. / mín.</span>
+        <span id="stat-vel-range" style="font-weight:500; font-size:12px;">—</span>
+      </div>
+      <div class="daily-row">
+        <span style="font-size:13px; color:var(--text-secondary);">Ráfaga máx.</span>
+        <span id="stat-max-gust" style="font-weight:500; color:var(--orange);">—</span>
+      </div>
+      <div class="daily-row">
+        <span style="font-size:13px; color:var(--text-secondary);">Ráfaga máx. 1h</span>
+        <span id="stat-gust-1h" style="font-weight:500;">—</span>
+      </div>
+      <div class="daily-row">
+        <span style="font-size:13px; color:var(--text-secondary);">P90 velocidad</span>
+        <span id="stat-p90" style="font-weight:500;">—</span>
+      </div>
+      <div class="daily-row">
+        <span style="font-size:13px; color:var(--text-secondary);">Turbulencia (TI)</span>
+        <span id="stat-turb" style="font-weight:500;">—</span>
+      </div>
+      <div class="daily-row">
+        <span style="font-size:13px; color:var(--text-secondary);">Dir. predominante</span>
+        <span id="stat-dir-prev" style="font-weight:500;">—</span>
+      </div>
+      <div class="daily-row">
+        <span style="font-size:13px; color:var(--text-secondary);">Amanecer / Ocaso</span>
+        <span style="font-size:12px;">07:19 – 19:33</span>
+      </div>
+    </div>
+
+    <!-- TARJETA: VIENTO EFECTIVO EN LADERA -->
+    <div class="card" style="grid-column: span 2;">
+      <div class="card-label">Viento efectivo en ladera</div>
+
+      <!-- Selector de orientación de ladera -->
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap;">
+        <label style="font-size:12px; color:var(--text-secondary);">Orientación ladera:</label>
+        <select id="slope-dir-select"
+                style="font-size:12px; padding:4px 8px; border-radius:var(--radius-md);
+                       border:0.5px solid var(--border); background:var(--bg-secondary);
+                       color:var(--text-primary); cursor:pointer;">
+          <option value="0">N – 0°</option>
+          <option value="22">NNE – 22°</option>
+          <option value="45">NE – 45°</option>
+          <option value="67">ENE – 67°</option>
+          <option value="90">E – 90°</option>
+          <option value="112">ESE – 112°</option>
+          <option value="135">SE – 135°</option>
+          <option value="157">SSE – 157°</option>
+          <option value="180" selected>S – 180°</option>
+          <option value="202">SSO – 202°</option>
+          <option value="225">SO – 225°</option>
+          <option value="247">OSO – 247°</option>
+          <option value="270">O – 270°</option>
+          <option value="292">ONO – 292°</option>
+          <option value="315">NO – 315°</option>
+          <option value="337">NNO – 337°</option>
+        </select>
+        <span style="font-size:11px; color:var(--text-secondary);">↑ Dirección a la que mira la ladera (cara de despegue)</span>
+      </div>
+
+      <!-- Resultado: componente de cara + cola -->
+      <div style="display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start;">
+        <div>
+          <div style="font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px;">Viento útil (de cara)</div>
+          <div style="display:flex; align-items:baseline; gap:5px;">
+            <span id="wind-useful" style="font-size:34px; font-weight:500; line-height:1; color:#1D9E75;"
+                  title="Viento útil = parte del viento que viene alineado con la ladera">—</span>
+            <span style="font-size:13px; color:var(--text-secondary);">km/h</span>
+          </div>
+          <div id="wind-useful-label" style="font-size:12px; color:var(--text-secondary); margin-top:3px;">—</div>
+        </div>
+
+        <div style="width:1px; background:var(--border); align-self:stretch;"></div>
+
+        <div>
+          <div style="font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px;">Ángulo viento / ladera</div>
+          <div style="display:flex; align-items:baseline; gap:5px;">
+            <span id="wind-angle" style="font-size:34px; font-weight:500; line-height:1; color:var(--blue);">—</span>
+            <span style="font-size:13px; color:var(--text-secondary);">°</span>
+          </div>
+          <div id="wind-angle-label" style="font-size:12px; color:var(--text-secondary); margin-top:3px;">—</div>
+        </div>
+
+        <div style="width:1px; background:var(--border); align-self:stretch;"></div>
+
+        <div>
+          <div style="font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px;">Ventana de vuelo</div>
+          <div id="flight-window-badge"
+               style="display:inline-block; font-size:13px; font-weight:600;
+                      padding:4px 12px; border-radius:var(--radius-md);
+                      border:1.5px solid transparent; margin-top:4px;">—</div>
+          <div id="flight-window-detail" style="font-size:11px; color:var(--text-secondary); margin-top:4px;">—</div>
+        </div>
+
+        <div style="width:1px; background:var(--border); align-self:stretch;"></div>
+
+        <div>
+          <div style="font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px;">Decisión de vuelo</div>
+          <div id="flight-decision" style="font-size:15px; font-weight:600; margin-top:6px;">—</div>
+          <div id="flight-reason"   style="font-size:11px; color:var(--text-secondary); margin-top:3px;">—</div>
+          <!-- Ciclo térmico / de viento -->
+          <div id="cycle-badge"
+               style="display:inline-block; margin-top:8px; font-size:12px; font-weight:600;
+                      padding:3px 10px; border-radius:var(--radius-md);
+                      border:1px solid transparent;">—</div>
+          <div id="shear-badge"
+               style="display:block; margin-top:6px; font-size:12px; font-weight:600;
+                      padding:3px 10px; border-radius:var(--radius-md);
+                      border:1px solid transparent;">—</div>
+          <div id="dir-stability-badge"
+               style="display:block; margin-top:6px; font-size:12px; font-weight:600;
+                      padding:3px 10px; border-radius:var(--radius-md);
+                      border:1px solid transparent;">—</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /.top-grid -->
+
+
+  <!-- ============================================================
+       SECCIÓN 2: TABLA DE PROMEDIOS CADA 15 MINUTOS
+       ============================================================ -->
+  <div class="section-title">Promedios cada 15 minutos — hoy</div>
+  <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">
+    Actualizado: 15:18:09 Dom CET
+  </div>
+  <div class="tbl-wrap">
+    <table class="htable" id="tbl15"></table>
+  </div>
+
+
+  <!-- ============================================================
+       SECCIÓN 3: TABLA DE PROMEDIOS POR HORA (48 HORAS)
+       ============================================================ -->
+  <div class="section-title">Promedios por hora — últimas 48 horas</div>
+  <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">
+    Actualizado: 15:18:09 Dom CET
+  </div>
+  <div class="tbl-wrap">
+    <table class="htable" id="tblH"></table>
+  </div>
+
+
+  <!-- ============================================================
+       SECCIÓN 4: BOTONES DE ZOOM (sincronizado para los 3 gráficos)
+       ============================================================ -->
+  <div class="zoom-bar">
+    <button class="zoom-btn"        data-zoom="3">3h</button>
+    <button class="zoom-btn active" data-zoom="8">8h</button>
+    <button class="zoom-btn"        data-zoom="16">16h</button>
+    <button class="zoom-btn"        data-zoom="32">2d</button>
+  </div>
+
+
+  <!-- ============================================================
+       SECCIÓN 5: GRÁFICOS
+       ============================================================ -->
+
+  <!-- Gráfico 1: Velocidad del viento -->
+  <div class="section-title" style="margin-top:16px;">Velocidad del viento (km/h)</div>
+  <div class="legend">
+    <span><span class="legend-dot" style="background:#1D9E75;"></span>Velocidad</span>
+    <span><span class="legend-dot" style="background:#D85A30; opacity:.8;"></span>Ráfaga</span>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="windChart"></canvas>
+  </div>
+
+  <!-- Gráfico 2: Dirección del viento -->
+  <div class="section-title">Dirección del viento (°)</div>
+  <div class="legend">
+    <span><span class="legend-dot" style="background:#378ADD;"></span>Dirección</span>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="dirChart"></canvas>
+  </div>
+
+  <!-- Gráfico 3: Precipitación -->
+  <div class="section-title">Precipitación (mm)</div>
+  <div class="legend">
+    <span><span class="legend-dot" style="background:#85B7EB;"></span>Precipitación acumulada</span>
+  </div>
+  <div class="chart-wrap short">
+    <canvas id="rainChart"></canvas>
+  </div>
+
+
+  <!-- ============================================================
+       PIE DE PÁGINA
+       ============================================================ -->
+  <div class="meta-row">
+    <span>Actualizado: 15:18:09 Dom CET</span>
+    <span>39.9339°N, 4.8606°O</span>
+    <a href="https://maps.google.com/?q=39.933897,-4.860555" target="_blank">Ver en mapa</a>
+  </div>
+
+</div><!-- /.dash -->
+
+
+<!-- ============================================================
+     SCRIPT PRINCIPAL
+     ============================================================
+     Orden de ejecución al cargar la página:
+       1. Definición de los tres arrays de datos
+       2. buildHTable() × 2 → construye las tablas en el DOM
+       3. buildCharts(8)   → inicializa los gráficos con zoom 8h
+     ============================================================ -->
+<script>
+
+  /* ============================================================
+     BLOQUE 1 — DATOS
+     ============================================================ */
+
+  /*
+    data15: Promedios cada 15 minutos del 22 Mar 2026
+    ──────────────────────────────────────────────────
+    Fuente: Madroño, capturado entre 07:30 y 15:15 CET
+    Campos:
+      t    (string)  → etiqueta de hora para la tabla/gráfico
+      v    (number)  → velocidad media del viento (km/h)
+      g    (number)  → ráfaga máxima del período (km/h)
+      d    (number)  → dirección del viento en grados (0-360, 0=Norte)
+      dir  (string)  → dirección en rosa de los vientos (NNE, NE, etc.)
+      tmp  (number)  → temperatura media (°C)
+      hour (boolean) → true si es hora en punto → columna con fondo gris
+  */
+  const data15 = [
+    {t:'07:30', v:5,  g:8,  d:31,  dir:'NNE', tmp:7.7},
+    {t:'07:45', v:4,  g:8,  d:26,  dir:'NNE', tmp:8.1},
+    {t:'08h',   v:6,  g:10, d:28,  dir:'NNE', tmp:9.1,  hour:true},
+    {t:'08:15', v:8,  g:13, d:41,  dir:'NE',  tmp:10.0},
+    {t:'08:30', v:8,  g:13, d:36,  dir:'NE',  tmp:10.4},
+    {t:'08:45', v:8,  g:15, d:44,  dir:'NE',  tmp:10.8},
+    {t:'09h',   v:10, g:15, d:53,  dir:'NE',  tmp:11.1, hour:true},
+    {t:'09:15', v:9,  g:15, d:48,  dir:'NE',  tmp:11.8},
+    {t:'09:30', v:11, g:16, d:45,  dir:'NE',  tmp:12.3},
+    {t:'09:45', v:11, g:16, d:39,  dir:'NE',  tmp:12.7},
+    {t:'10h',   v:9,  g:15, d:38,  dir:'NE',  tmp:13.8, hour:true},
+    {t:'10:15', v:8,  g:14, d:27,  dir:'NNE', tmp:14.7},
+    {t:'10:30', v:9,  g:15, d:29,  dir:'NNE', tmp:15.1},
+    {t:'10:45', v:8,  g:15, d:30,  dir:'NNE', tmp:15.8},
+    {t:'11h',   v:8,  g:15, d:37,  dir:'NE',  tmp:16.2, hour:true},
+    {t:'11:15', v:7,  g:14, d:38,  dir:'NE',  tmp:16.4},
+    {t:'11:30', v:7,  g:15, d:36,  dir:'NE',  tmp:16.6},
+    {t:'11:45', v:5,  g:9,  d:26,  dir:'NNE', tmp:16.9},
+    {t:'12h',   v:6,  g:13, d:34,  dir:'NE',  tmp:16.7, hour:true},
+    {t:'12:15', v:6,  g:14, d:6,   dir:'N',   tmp:17.2},
+    {t:'12:30', v:5,  g:11, d:5,   dir:'N',   tmp:17.5},
+    {t:'12:45', v:4,  g:10, d:359, dir:'N',   tmp:18.0},
+    {t:'13h',   v:4,  g:10, d:36,  dir:'NE',  tmp:18.8, hour:true},
+    {t:'13:15', v:5,  g:10, d:322, dir:'NW',  tmp:18.6},
+    {t:'13:30', v:3,  g:9,  d:329, dir:'NNW', tmp:19.4},
+    {t:'13:45', v:4,  g:11, d:282, dir:'WNW', tmp:19.4},
+    {t:'14h',   v:5,  g:11, d:314, dir:'NW',  tmp:19.4, hour:true},
+    {t:'14:15', v:3,  g:7,  d:334, dir:'NNW', tmp:20.1},
+    {t:'14:30', v:4,  g:8,  d:19,  dir:'NNE', tmp:20.4},
+    {t:'14:45', v:1,  g:8,  d:63,  dir:'ENE', tmp:20.8},
+    {t:'15h',   v:4,  g:14, d:178, dir:'S',   tmp:21.5, hour:true},
+    {t:'15:15', v:3,  g:8,  d:164, dir:'SSE', tmp:22.3}
+  ];
+
+  /*
+    dataH: Promedios por hora — últimas 48 horas
+    ──────────────────────────────────────────────
+    Fuente: Madroño, Sábado 21 Mar y Domingo 22 Mar 2026
+    Campos iguales que data15, más:
+      day (boolean) → true en la primera columna de cada día (Sat / Sun)
+                      actúa como separador visual azul igual que estación meteorológica
+  */
+  const dataH = [
+    {t:'Sat', v:16, g:32, d:54, dir:'NE',  tmp:10.6, day:true},
+    {t:'01h', v:16, g:31, d:58, dir:'ENE', tmp:10.5},
+    {t:'02h', v:18, g:29, d:57, dir:'ENE', tmp:10.2},
+    {t:'03h', v:14, g:26, d:57, dir:'ENE', tmp:9.8},
+    {t:'04h', v:13, g:25, d:56, dir:'NE',  tmp:9.7},
+    {t:'05h', v:14, g:23, d:55, dir:'NE',  tmp:9.5},
+    {t:'06h', v:11, g:20, d:54, dir:'NE',  tmp:9.3},
+    {t:'07h', v:11, g:20, d:62, dir:'ENE', tmp:9.2},
+    {t:'08h', v:12, g:22, d:66, dir:'ENE', tmp:9.3},
+    {t:'09h', v:12, g:22, d:65, dir:'ENE', tmp:9.0},
+    {t:'10h', v:13, g:23, d:64, dir:'ENE', tmp:10.5},
+    {t:'11h', v:17, g:31, d:65, dir:'ENE', tmp:11.7},
+    {t:'12h', v:16, g:27, d:77, dir:'ENE', tmp:12.3},
+    {t:'13h', v:16, g:28, d:66, dir:'ENE', tmp:13.1},
+    {t:'14h', v:15, g:27, d:55, dir:'NE',  tmp:13.7},
+    {t:'15h', v:15, g:27, d:57, dir:'ENE', tmp:14.0},
+    {t:'16h', v:15, g:26, d:70, dir:'ENE', tmp:13.9},
+    {t:'17h', v:14, g:25, d:74, dir:'ENE', tmp:13.9},
+    {t:'18h', v:11, g:20, d:82, dir:'E',   tmp:12.7},
+    {t:'19h', v:8,  g:14, d:87, dir:'E',   tmp:12.1},
+    {t:'20h', v:4,  g:9,  d:81, dir:'E',   tmp:11.4},
+    {t:'21h', v:3,  g:7,  d:70, dir:'ENE', tmp:10.7},
+    {t:'22h', v:4,  g:8,  d:66, dir:'ENE', tmp:9.1},
+    {t:'23h', v:3,  g:7,  d:46, dir:'NE',  tmp:7.3},
+    {t:'Sun', v:2,  g:5,  d:55, dir:'NE',  tmp:7.5,  day:true},
+    {t:'01h', v:3,  g:7,  d:34, dir:'NE',  tmp:8.5},
+    {t:'02h', v:0,  g:3,  d:42, dir:'NE',  tmp:8.6},
+    {t:'03h', v:4,  g:8,  d:1,  dir:'N',   tmp:8.5},
+    {t:'04h', v:2,  g:7,  d:46, dir:'NE',  tmp:8.6},
+    {t:'05h', v:4,  g:8,  d:41, dir:'NE',  tmp:8.6},
+    {t:'06h', v:5,  g:9,  d:48, dir:'NE',  tmp:8.4},
+    {t:'07h', v:5,  g:13, d:44, dir:'NE',  tmp:8.2}
+  ];
+
+  /*
+    allHourly: datos combinados para los gráficos (48h completas)
+    ──────────────────────────────────────────────────────────────
+    Combina los datos horarios del sábado con los datos de 15 min
+    del domingo para disponer de un único array del que se extrae
+    el slice según el zoom seleccionado.
+    Campo r → precipitación (mm): 0 salvo en 09:30-10:15 del domingo.
+  */
+
+  /* ── Re-muestreo a resolución uniforme de 15 min ─────────────
+     Los datos horarios tienen resolución de 60 min.
+     Los datos recientes (data15) tienen resolución de 15 min.
+     Mezclarlos directamente en allHourly produce un gráfico
+     "engañoso": la parte horaria parece 4× más densa visualmente.
+
+     Solución (Opción A — rápida):
+       Expandir cada registro horario en 4 puntos de 15 min
+       mediante interpolación lineal entre el registro i y el i+1.
+       La dirección usa interpolación circular (arco más corto).
+       La precipitación se reparte uniformemente entre los 4 subpuntos.
+
+     Resultado: allHourly tiene resolución homogénea de 15 min
+     en toda la ventana histórica + la parte reciente real.
+  ──────────────────────────────────────────────────────────── */
+
+  /* Datos brutos horarios (sólo para interpolación — NO para gráficos directamente) */
+  const _rawHourly = [
+    {t:'Sat 00h',v:16,g:32,d:54,r:0}, {t:'01h',v:16,g:31,d:58,r:0},
+    {t:'02h',v:18,g:29,d:57,r:0},     {t:'03h',v:14,g:26,d:57,r:0},
+    {t:'04h',v:13,g:25,d:56,r:0},     {t:'05h',v:14,g:23,d:55,r:0},
+    {t:'06h',v:11,g:20,d:54,r:0},     {t:'07h',v:11,g:20,d:62,r:0},
+    {t:'08h',v:12,g:22,d:66,r:0},     {t:'09h',v:12,g:22,d:65,r:0},
+    {t:'10h',v:13,g:23,d:64,r:0},     {t:'11h',v:17,g:31,d:65,r:0},
+    {t:'12h',v:16,g:27,d:77,r:0},     {t:'13h',v:16,g:28,d:66,r:0},
+    {t:'14h',v:15,g:27,d:55,r:0},     {t:'15h',v:15,g:27,d:57,r:0},
+    {t:'16h',v:15,g:26,d:70,r:0},     {t:'17h',v:14,g:25,d:74,r:0},
+    {t:'18h',v:11,g:20,d:82,r:0},     {t:'19h',v:8, g:14,d:87,r:0},
+    {t:'20h',v:4, g:9, d:81,r:0},     {t:'21h',v:3, g:7, d:70,r:0},
+    {t:'22h',v:4, g:8, d:66,r:0},     {t:'23h',v:3, g:7, d:46,r:0},
+    {t:'Sun 00h',v:2,g:5,d:55,r:0},   {t:'01h',v:3,g:7,d:34,r:0},
+    {t:'02h',v:0,g:3,d:42,r:0},       {t:'03h',v:4,g:8,d:1, r:0},
+    {t:'04h',v:2,g:7,d:46,r:0},       {t:'05h',v:4,g:8,d:41,r:0},
+    {t:'06h',v:5,g:9,d:48,r:0},       {t:'07h',v:5,g:9,d:44,r:0}
+  ];
+
+  /**
+   * Interpola angularmente por el arco más corto.
+   * Devuelve el ángulo en [0, 360).
+   */
+  function _lerpAngle(a, b, t) {
+    let diff = b - a;
+    if (diff >  180) diff -= 360;
+    if (diff < -180) diff += 360;
+    return ((a + diff * t) + 360) % 360;
+  }
+
+  /**
+   * Expande un array de registros horarios a resolución de 15 min
+   * mediante interpolación lineal entre puntos consecutivos.
+   * Cada intervalo [i, i+1] genera 4 sub-puntos (t=0, 0.25, 0.5, 0.75).
+   * El último registro se emite sin expansión.
+   *
+   * @param {Array} hourly  Registros con { t, v, g, d, r }
+   * @returns {Array}       Registros a 15 min con etiqueta t+'_'+k
+   */
+  function resampleToQuarterly(hourly) {
+    const out = [];
+    for (let i = 0; i < hourly.length - 1; i++) {
+      const a = hourly[i];
+      const b = hourly[i + 1];
+      for (let k = 0; k < 4; k++) {
+        const f = k / 4;
+        out.push({
+          t: k === 0 ? a.t : a.t + '+' + (k * 15) + 'm',
+          v: Math.round(a.v + (b.v - a.v) * f),
+          /* Ráfaga: asignación temporal, no interpolación.
+             Los primeros 2 sub-puntos (primera mitad del intervalo)
+             heredan el máximo de la hora de origen.
+             Los últimos 2 (segunda mitad) anticipan la hora siguiente.
+             Representa mejor la transición real entre picos horarios. */
+          g: f < 0.5 ? a.g : b.g,
+          d: Math.round(_lerpAngle(a.d, b.d, f)),
+          /* Precipitación: NO se distribuye uniformemente.
+             Dividir entre 4 oculta la intensidad real del evento:
+             5 mm/h repartidos en 4×1.25 mm parecen llovizna,
+             cuando en realidad son 5 mm caídos en esa hora.
+             Se asigna el total acumulado al primer sub-punto (k=0)
+             y 0 a los restantes — preserva la magnitud del evento
+             y es la convención estándar en re-muestreo de precipitación. */
+          r: k === 0 ? (a.r || 0) : 0,
+        });
+      }
+    }
+    const last = hourly[hourly.length - 1];
+    out.push({ t: last.t, v: last.v, g: last.g, d: last.d, r: last.r || 0 });
+    return out;
+  }
+
+  /* allHourly: serie uniforme de 15 min (histórico expandido + reciente real) */
+  const allHourly = [
+    ...resampleToQuarterly(_rawHourly),
+    ...data15.map(r => ({
+      t: r.t,
+      v: r.v,
+      g: r.g,
+      d: r.d,
+      r: ['09:30','09:45','10h','10:15'].includes(r.t) ? 0.2 : 0
+    }))
+  ];
+
+
+  /* ============================================================
+     BLOQUE 2 — FUNCIÓN: arrowSvg(deg)
+     ============================================================
+     Genera un SVG inline con una flecha que indica la dirección
+     del viento. La flecha apunta al norte por defecto y se rota
+     `deg` grados alrededor del centro del viewBox (8,8).
+
+     Parámetros:
+       deg (number) → dirección del viento en grados (0–360)
+
+     Retorna:
+       string — HTML del SVG listo para insertarse con innerHTML
+     ============================================================ */
+  function arrowSvg(deg) {
+    /* Convención meteorológica: la flecha apunta de donde viene el viento.
+       d=0 → viento del Norte → flecha apunta hacia arriba (Norte). Sin offset. */
+    return `<svg width="26" height="26" viewBox="0 0 26 26"
+              xmlns="http://www.w3.org/2000/svg"
+              style="display:inline-block; vertical-align:middle;"
+              aria-label="Viento procedente de ${deg}°">
+              <g transform="rotate(${deg}, 13, 13)">
+                <polygon points="13,3 11,15 13,12 15,15" fill="#1D9E75"/>
+                <polygon points="13,23 11,11 13,14 15,11" fill="#9a9a94" opacity="0.5"/>
+              </g>
+            </svg>`;
+  }
+
+
+  /* ============================================================
+     BLOQUE 3 — FUNCIÓN: buildHTable(tableId, rows)
+     ============================================================
+     Construye una tabla HTML en formato HORIZONTAL replicando
+     el estilo de estación meteorológica:
+       - Las FILAS son las métricas (Tiempo, Vel., Ráfaga…)
+       - Las COLUMNAS son los intervalos de tiempo
+
+     Algoritmo:
+       Para cada fila (métrica), se crea un <tr>.
+       La primera celda es .row-label (sticky, fondo gris).
+       Por cada elemento de `rows`, se añade una <td> con el valor
+       correspondiente y los estilos adecuados.
+
+     Parámetros:
+       tableId (string) → ID del <table> en el DOM
+       rows    (array)  → array de objetos de datos (data15 o dataH)
+     ============================================================ */
+  function buildHTable(tableId, rows) {
+    const tbl = document.getElementById(tableId);
+
+    /* Definición de las 6 filas: [etiqueta visible, clave en el objeto de datos] */
+    const rowLabels = ['Tiempo', 'Velocidad', 'Ráfaga (km/h)', 'Dirección', 'Dirección Deg.', 'Temp. (°C)'];
+    const rowKeys   = ['t',      'v',         'g',             'arrow',     'dir_deg',         'tmp'];
+
+    rowLabels.forEach((label, ri) => {
+      const tr = tbl.insertRow();
+
+      /* Primera celda: etiqueta de fila (sticky al scroll horizontal) */
+      const th = tr.insertCell();
+      th.className = 'row-label';
+      th.textContent = label;
+
+      /* Una celda de dato por cada columna de tiempo */
+      rows.forEach(col => {
+        const td = tr.insertCell();
+
+        /* Estilo de columna según tipo */
+        if      (col.day)  td.className = 'col-day';    /* Sat / Sun → azul */
+        else if (col.hour) td.className = 'col-hour';   /* 08h, 09h… → gris */
+
+        /* Contenido de la celda según la fila que estamos construyendo */
+        const key = rowKeys[ri];
+        if (key === 't') {
+          /* Fila Tiempo: etiqueta de hora tal cual */
+          td.textContent = col.t;
+
+        } else if (key === 'v') {
+          /* Fila Velocidad: valor numérico */
+          td.textContent = col.v;
+
+        } else if (key === 'g') {
+          /* Fila Ráfaga: valor en naranja */
+          td.classList.add('gust');
+          td.textContent = col.g;
+
+        } else if (key === 'arrow') {
+          /* Fila Dirección: flecha SVG rotada al ángulo del viento */
+          td.style.padding = '3px 8px';
+          td.innerHTML = arrowSvg(col.d);
+
+        } else if (key === 'dir_deg') {
+          /* Fila Dirección Deg.: texto "NNE 31°" */
+          td.classList.add('dir-txt');
+          td.textContent = col.dir + ' ' + col.d + '°';
+
+        } else if (key === 'tmp') {
+          /* Fila Temperatura: un decimal */
+          td.textContent = col.tmp.toFixed(1);
+        }
+      });
+    });
+  }
+
+  /* ── Backfill de timestamps en data15 ───────────────────────
+     Los datos históricos estáticos no tienen campo `ts`.
+     Se reconstruye asumiendo un intervalo de 15 min entre
+     registros, contando hacia atrás desde el momento actual.
+     Esto desbloquea calcBadges() → ventana real de 15 min,
+     alertas temporales correctas y tendencia doble escala.
+  ──────────────────────────────────────────────────────────── */
+  (function backfillTs() {
+    const now      = Date.now();
+    const STEP_MS  = 15 * 60 * 1000;   /* 15 min en ms */
+    data15.forEach((r, i) => {
+      r.ts = now - (data15.length - 1 - i) * STEP_MS;
+    });
+  })();
+
+  /* Tablas y scroll se construyen en _init() */
+
+
+  /* ============================================================
+     BLOQUE 4 — ESTADO DE LOS GRÁFICOS
+     ============================================================
+     `charts` guarda las tres instancias de Chart.js.
+     Es necesario para poder llamar .update() en setZoom()
+     sin tener que destruir y recrear los gráficos.
+     ============================================================ */
+  let charts = {};
+
+
+  /* ============================================================
+     BLOQUE 5 — FUNCIÓN: getSlice(n)
+     ============================================================
+     Extrae los últimos `n` elementos del array allHourly.
+     Utilizada en buildCharts() y en setZoom() para obtener
+     el subconjunto de datos correspondiente al zoom activo.
+
+     Parámetros:
+       n (number) → número de puntos a mostrar
+
+     Retorna:
+       array — los últimos n elementos de allHourly
+     ============================================================ */
+  function getSlice(n) {
+    return allHourly.slice(-n);
+  }
+
+
+  /* ============================================================
+     BLOQUE 6 — FUNCIÓN: buildCharts(n)
+     ============================================================
+     Crea e inicializa los tres gráficos Chart.js con los
+     últimos `n` puntos del histórico.
+
+     Notas técnicas:
+       - Canvas no puede resolver variables CSS → se usan hex
+       - El legend de Chart.js se desactiva (display:false)
+         para usar la leyenda manual en HTML
+       - maintainAspectRatio:false + height en .chart-wrap
+         controlan el tamaño (NO en el canvas directamente)
+       - El gráfico de dirección tiene el eje Y de 0 a 360
+         con etiquetas cardinales cada 45°
+
+     Parámetros:
+       n (number) → puntos iniciales a mostrar (por defecto 8)
+     ============================================================ */
+  /* ── Suavizado de series de dirección para gráficos ─────────
+     El gráfico de Chart.js trata los ángulos como números:
+     un salto de 359° → 1° dibuja una línea vertical de 358 px.
+     Esta función "desarrolla" la serie eligiendo siempre el
+     camino angular más corto entre dos puntos consecutivos,
+     permitiendo que los valores salgan del rango [0, 360).
+     Chart.js renderiza la línea de forma continua; los labels
+     del eje Y siguen mostrando cardinales mediante el callback.
+  ──────────────────────────────────────────────────────────── */
+  function smoothDirectionSeries(arr) {
+    if (!arr.length) return arr;
+    const out = [arr[0]];
+    for (let i = 1; i < arr.length; i++) {
+      let prev = out[i - 1];
+      let cur  = arr[i];
+      let diff = cur - prev;
+      if (diff >  180) cur -= 360;
+      if (diff < -180) cur += 360;
+      out.push(cur);
+    }
+    return out;
+  }
+
+  function buildCharts(n) {
+    /* Guard: canvas elements must exist */
+    if (!$('windChart') || !$('dirChart') || !$('rainChart')) {
+      console.warn('buildCharts: canvas elements not found');
+      return;
+    }
+
+    /* Destroy existing instances to prevent memory leaks.
+       Chart.js keeps a WeakMap of canvas→instance; calling destroy()
+       releases the WebGL context and all event listeners. */
+    if (charts.wind)  { charts.wind.destroy();  charts.wind  = null; }
+    if (charts.dir)   { charts.dir.destroy();   charts.dir   = null; }
+    if (charts.rain)  { charts.rain.destroy();  charts.rain  = null; }
+
+    const sl   = getSlice(n);
+    const lbs  = sl.map(r => r.t);
+    const spd  = sl.map(r => r.v);
+    const gst  = sl.map(r => r.g);
+    const dir  = smoothDirectionSeries(sl.map(r => r.d));
+    const rain = sl.map(r => r.r || 0);
+
+    /* Colores adaptativos al modo oscuro (Chart.js no lee CSS vars) */
+    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const gridC  = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(128,128,128,0.1)';
+    const tickC  = isDark ? '#9a9a94' : '#6b6b67';
+
+    const xOpts = {
+      ticks: { font: { size:10 }, color: tickC, maxRotation:45, autoSkip:true },
+      grid:  { display: false }
+    };
+    const yOpts = {
+      ticks: { font: { size:10 }, color: tickC },
+      grid:  { color: gridC }
+    };
+
+    /* Gráfico 1: Velocidad + Ráfaga */
+    charts.wind = new Chart($('windChart'), {
+      type: 'line',
+      data: {
+        labels: lbs,
+        datasets: [
+          {
+            label: 'Velocidad',
+            data: spd,
+            borderColor: '#1D9E75',
+            backgroundColor: 'rgba(29,158,117,0.1)',
+            fill: true, tension: 0.3, pointRadius: 1, borderWidth: 2
+          },
+          {
+            label: 'Ráfaga',
+            data: gst,
+            borderColor: '#D85A30',
+            backgroundColor: 'rgba(216,90,48,0.05)',
+            fill: true, tension: 0.3, pointRadius: 1, borderWidth: 1.5,
+            borderDash: [4, 3]
+          }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: false,                              /* sin animación en rebuild — más fluido */
+        plugins: { legend: { display: false } },
+        scales: { x: xOpts, y: { ...yOpts, beginAtZero: true } }
+      }
+    });
+
+    /* Gráfico 2: Dirección */
+    const cardinals = { 0:'N', 45:'NE', 90:'E', 135:'SE', 180:'S', 225:'SO', 270:'O', 315:'NO', 360:'N' };
+    function normalizeDir(d) { return ((d % 360) + 360) % 360; }
+    const dirTickCb = v => { const norm = normalizeDir(v); return cardinals[norm] ?? ''; };
+    const dirTooltip = {
+      callbacks: {
+        label: ctx => {
+          const norm = Math.round(normalizeDir(ctx.parsed.y));
+          const card = cardinals[Math.round(norm / 45) * 45] ?? degreesToCardinal(norm);
+          return `${card} · ${norm}°`;
+        }
+      }
+    };
+
+    charts.dir = new Chart($('dirChart'), {
+      type: 'line',
+      data: {
+        labels: lbs,
+        datasets: [{
+          label: 'Dirección',
+          data: dir,
+          borderColor: '#378ADD',
+          backgroundColor: 'rgba(55,138,221,0.08)',
+          fill: true, tension: 0.2, pointRadius: 1, borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: false,
+        plugins: { legend: { display: false }, tooltip: dirTooltip },
+        scales: {
+          x: xOpts,
+          y: {
+            ...yOpts,
+            ticks: { ...yOpts.ticks, stepSize: 45, callback: dirTickCb }
+          }
+        }
+      }
+    });
+
+    /* Gráfico 3: Precipitación */
+    charts.rain = new Chart($('rainChart'), {
+      type: 'bar',
+      data: {
+        labels: lbs,
+        datasets: [{
+          label: 'Precipitación',
+          data: rain,
+          backgroundColor: '#85B7EB',
+          borderColor: '#378ADD',
+          borderWidth: 0.5,
+          borderRadius: 2
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: false,
+        plugins: { legend: { display: false } },
+        scales: { x: xOpts, y: { ...yOpts, beginAtZero: true } }
+      }
+    });
+  }
+
+
+  /* ============================================================
+     BLOQUE 7 — FUNCIÓN: setZoom(btn, n)
+     ============================================================
+     Actualiza los tres gráficos con los últimos `n` puntos
+     sin recrear las instancias de Chart.js (más eficiente).
+     Solo se reemplazan los datos de los datasets y se llama
+     .update() en cada gráfico.
+
+     Parámetros:
+       btn (HTMLElement) → botón pulsado, para marcar .active
+       n   (number)      → número de puntos a mostrar
+     ============================================================ */
+  function setZoom(btn, n) {
+    /* Actualizar estado visual de los botones */
+    document.querySelectorAll('.zoom-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    /* Extraer el nuevo subconjunto de datos */
+    const sl   = getSlice(n);
+    const lbs  = sl.map(r => r.t);
+    const spd  = sl.map(r => r.v);
+    const gst  = sl.map(r => r.g);
+    const dir  = smoothDirectionSeries(sl.map(r => r.d));
+    const rain = sl.map(r => r.r || 0);
+
+    /* Actualizar los tres gráficos con los nuevos datos */
+    charts.wind.data.labels            = lbs;
+    charts.wind.data.datasets[0].data  = spd;
+    charts.wind.data.datasets[1].data  = gst;
+    charts.wind.update();
+
+    charts.dir.data.labels             = lbs;
+    charts.dir.data.datasets[0].data   = dir;
+    charts.dir.update();
+
+    charts.rain.data.labels            = lbs;
+    charts.rain.data.datasets[0].data  = rain;
+    charts.rain.update();
+  }
+
+  /* ============================================================
+     BLOQUE 8 — ENGINE PRO
+     ============================================================ */
+
+  /* ── Escala de color ── */
+  /* ── Escala Beaufort (estándar OMM) ─────────────────────────
+     Referencia: km/h → fuerza Beaufort (Bft 0–8+ en tierra)
+       0: < 1   Calma
+       1: 1–5   Ventolina
+       2: 6–11  Brisa muy débil
+       3: 12–19 Flojito
+       4: 20–28 Flojo
+       5: 29–38 Bonancible
+       6: 39–49 Fresco
+       7: 50–61 Frescachón
+       8: ≥ 62  Temporal (y superiores)
+  ──────────────────────────────────────────────────────────── */
+  const BFT = [
+    /* bft, maxKmh,  clase CSS,   hex,       nombre */
+    [0,   0,  'wc-calm',   '#1D9E75', 'Calma'],
+    [1,   5,  'wc-calm',   '#1D9E75', 'Ventolina'],
+    [2,  11,  'wc-light',  '#4aaa3c', 'Brisa muy débil'],
+    [3,  19,  'wc-light',  '#4aaa3c', 'Flojito'],
+    [4,  28,  'wc-mod',    '#b8a800', 'Flojo'],
+    [5,  38,  'wc-fresh',  '#d07a10', 'Bonancible'],
+    [6,  49,  'wc-strong', '#cc2a2a', 'Fresco'],
+    [7,  61,  'wc-strong', '#cc2a2a', 'Frescachón'],
+    [8, Infinity, 'wc-storm', '#7a0000', 'Temporal'],
+  ];
+
+  function beaufort(v) {
+    for (let i = 0; i < BFT.length; i++) {
+      if (v <= BFT[i][1]) return BFT[i][0];
+    }
+    return 8;
+  }
+
+  function _bftRow(v) {
+    return BFT[beaufort(v)] ?? BFT[BFT.length - 1];
+  }
+
+  /** Clase CSS wc-* alineada con Beaufort. */
+  function windColorClass(v) { return _bftRow(v)[2]; }
+
+  /** Color hex alineado con Beaufort. */
+  function windColorHex(v)   { return _bftRow(v)[3]; }
+
+  /**
+   * Etiqueta "Bft N · Nombre" para mostrar en #cur-wind-label.
+   * Ejemplo: "Bft 4 · Flojo"
+   */
+  function windLabel(v) {
+    const row = _bftRow(v);
+    return 'Bft\u00A0' + row[0] + '\u00A0·\u00A0' + row[4];
+  }
+
+  /* ── Media vectorial ponderada por velocidad ── */
+  /**
+   * Media vectorial de dirección ponderada por energía cinética del viento.
+   *
+   * Fundamento físico:
+   *   La energía cinética del viento es proporcional a v².
+   *   Ponderar por v² da más peso a los períodos de viento fuerte,
+   *   que son los que determinan la dirección meteorológicamente
+   *   relevante (rachas, frentes). Ponderar solo por v infravalora
+   *   períodos de racha intensa frente a períodos de calma larga.
+   *
+   *   w = v²  (si v > 0, mínimo 0.01 para no descartar calmas)
+   *
+   *   Dirección media = atan2( Σ w·sin(d), Σ w·cos(d) )
+   *
+   * @param {Array} rows  Registros con .d (grados 0-360) y .v (km/h)
+   * @returns {number}    Dirección media en grados [0, 360)
+   */
+  function vectorMeanDir(rows) {
+    let sx = 0, sy = 0;
+    rows.forEach(r => {
+      const rad = r.d * Math.PI / 180;
+      const w   = r.v > 0 ? r.v * r.v : 0.01;   /* peso = v² (energía cinética) */
+      sx += w * Math.sin(rad);
+      sy += w * Math.cos(rad);
+    });
+    return ((Math.atan2(sx, sy) * 180 / Math.PI) + 360) % 360;
+  }
+  function degreesToCardinal(deg) {
+    const dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE',
+                  'S','SSO','SO','OSO','O','ONO','NO','NNO'];
+    return dirs[Math.round(deg / 22.5) % 16];
+  }
+
+  /* ── Estadísticas diarias ── */
+  function calcDailyStats() {
+    const speeds = data15.map(r => r.v);
+    const gusts  = data15.map(r => r.g);
+    const temps  = data15.map(r => r.tmp);
+    const avgVel = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+    const vecDeg = vectorMeanDir(data15);
+    return {
+      avgVel:  Math.round(avgVel),
+      maxVel:  Math.max(...speeds),
+      minVel:  Math.min(...speeds),
+      maxGust: Math.max(...gusts),
+      vecDeg:  Math.round(vecDeg),
+      vecCard: degreesToCardinal(vecDeg),
+      tmpCur:  temps[temps.length - 1],
+      tmpMin:  Math.min(...temps),
+      tmpMax:  Math.max(...temps)
+    };
+  }
+
+  /* ── Tendencia por regresión lineal ── */
+  function calcBadges() {
+    const WIN_MS = 15 * 60 * 1000;
+    const now    = Date.now();
+    const maxDay = Math.max(...data15.map(r => r.g));
+
+    /* ── Promedio 15 min REAL ── */
+    const win15  = data15.filter(r => r.ts && (now - r.ts) <= WIN_MS);
+    const sample = win15.length > 0 ? win15 : data15.slice(-4);
+    const avg15  = Math.round(sample.reduce((a, r) => a + r.v, 0) / sample.length);
+    const n15    = win15.length;
+
+    /* ── Tendencia doble escala (corto vs. largo plazo) ─────────
+       Compara la media de los últimos 4 registros (~1 h)
+       con la media de los últimos 12 registros (~3 h).
+       diff = avgShort − avgLong:
+         > +2.0  → subida rápida y clara
+         > +0.8  → subida moderada
+         < −2.0  → bajada rápida y clara
+         < −0.8  → bajada moderada
+         resto   → estable
+       Ventaja sobre slope: inmune a un único pico puntual;
+       necesita tendencia sostenida para cambiar de categoría. */
+    const short  = data15.slice(-4).map(r => r.v);
+    const long   = data15.slice(-12).map(r => r.v);
+    const avgS   = short.reduce((a, b) => a + b, 0) / short.length;
+    const avgL   = long.reduce((a, b) => a + b, 0) / (long.length || 1);
+    const diff   = avgS - avgL;
+
+    let trend, level;
+    if      (diff >  2.0) { trend = '↑ Subiendo rápido'; level = 'up';   }
+    else if (diff >  0.8) { trend = '↗ Subiendo';        level = 'up';   }
+    else if (diff < -2.0) { trend = '↓ Bajando rápido';  level = 'down'; }
+    else if (diff < -0.8) { trend = '↘ Bajando';         level = 'down'; }
+    else                  { trend = '→ Estable';          level = 'flat'; }
+
+    return { avg15, n15, maxDay, trend, level, diff };
+  }
+
+  /* ── Alertas meteorológicas PRO ─────────────────────────────
+     Combina dos capas de detección:
+
+     CAPA 1 — Umbrales absolutos (avisos estándar WMO):
+       ≥ 70 km/h ráfaga → Aviso naranja
+       ≥ 50 km/h ráfaga → Aviso amarillo
+       ≥ 30 km/h sostenido (media 1h) → Viento fuerte sostenido
+
+     CAPA 2 — Eventos dinámicos (estación real):
+       gustJump > 15 km/h entre dos períodos consecutivos
+         → Racha súbita: subida brusca e impredecible
+       gustJump > 8 km/h entre dos períodos consecutivos
+         → Racha en aumento: incremento notable
+       v > 30 y g > 50 simultáneamente
+         → Viento fuerte sostenido + rachas: doble peligro
+       dirSwing > 90° entre últimos 4 registros (viraje brusco)
+         → Cambio de dirección brusco: frente o turbonada
+       g/v > 2.5 (ráfaga > 2.5× la media) y g > 20
+         → Viento muy irregular: ráfagas desproporcionadas
+
+     Deduplicación: si una condición más grave ya cubre el mismo
+     evento, no se añade la condición menor (ej.: naranja excluye
+     el aviso amarillo del mismo umbral).
+  ──────────────────────────────────────────────────────────── */
+  function detectAlerts() {
+    const alerts  = [];
+    const n       = data15.length;
+    const last    = data15[n - 1];
+    const prev    = n >= 2 ? data15[n - 2] : null;
+    const maxGust = Math.max(...data15.map(r => r.g));
+    const avg1h   = data15.slice(-4).reduce((a, r) => a + r.v, 0) / Math.min(4, n);
+
+    /* ── CAPA 1: Umbrales absolutos ── */
+    if (maxGust >= 70)
+      alerts.push({ level:'danger', icon:'🔴',
+        msg:`Aviso naranja — Ráfaga máxima registrada: ${maxGust} km/h` });
+    else if (maxGust >= 50)
+      alerts.push({ level:'warn', icon:'🟡',
+        msg:`Aviso amarillo — Ráfaga máxima registrada: ${maxGust} km/h` });
+
+    if (avg1h >= 30)
+      alerts.push({ level:'warn', icon:'💨',
+        msg:`Viento fuerte sostenido: media última hora ${Math.round(avg1h)} km/h` });
+
+    /* ── CAPA 2: Eventos dinámicos — via detectEvents() ── */
+    const ev = detectEvents(data15);
+
+    /* 2a. Frente de ráfaga */
+    if (prev) {
+      const gustJump = last.g - prev.g;
+      if (ev.gustFront)
+        alerts.push({ level:'danger', icon:'⚡',
+          msg:`Frente de ráfaga: +${gustJump} km/h respecto al período anterior` });
+      else if (gustJump > 8)
+        alerts.push({ level:'warn', icon:'↑',
+          msg:`Racha en aumento: +${gustJump} km/h en el último período` });
+    }
+
+    /* 2b. Cizalladura horizontal */
+    if (ev.shear) {
+      let dirDiff = Math.abs(last.d - (prev?.d ?? last.d));
+      if (dirDiff > 180) dirDiff = 360 - dirDiff;
+      alerts.push({ level:'warn', icon:'🔄',
+        msg:`Cizalladura: cambio de ${Math.round(dirDiff)}° en el último período` });
+    }
+
+    /* 2c. Caída súbita de velocidad */
+    if (ev.drop)
+      alerts.push({ level:'warn', icon:'📉',
+        msg:`Caída súbita: ${last.v} km/h (era ${prev?.v} km/h en el período anterior)` });
+
+    /* 2d. Viento fuerte sostenido + rachas simultáneas */
+    if (last.v > 30 && last.g > 50)
+      alerts.push({ level:'warn', icon:'⚠️',
+        msg:`Viento fuerte sostenido (${last.v} km/h) con rachas de ${last.g} km/h` });
+
+    /* 2e. Ráfaga desproporcionada */
+    if (gustFactor(last) > 2.5 && last.g > 20)
+      alerts.push({ level:'warn', icon:'〰️',
+        msg:`Viento muy irregular: Gf ${gustFactor(last).toFixed(1)} (ráfaga ${last.g} km/h, viento ${last.v} km/h)` });
+
+    return alerts;
+  }
+  /* ── Memoria temporal — evita parpadeos y cambios erráticos ──
+     lastState guarda el último valor *confirmado* de cada métrica
+     que tiende a oscilar entre actualizaciones.
+
+     Regla de confirmación (hysteresis):
+       Un valor nuevo solo se acepta si se repite N veces seguidas
+       (N = CONFIRM_STEPS). Mientras no se confirme, se mantiene
+       el estado anterior en el DOM.
+
+     Métricas protegidas:
+       trend  → badge de tendencia (evita up/flat/up/flat)
+       alert  → nivel máximo de alerta (evita danger/warn/danger)
+       dir    → dirección cardinal mostrada en texto (evita N/NNE/N)
+       gustCtx → diagnóstico de ráfaga (evita Estable/Destacada/Estable)
+  ──────────────────────────────────────────────────────────── */
+  const CONFIRM_STEPS = 2;   /* repeticiones necesarias para confirmar cambio */
+
+  const lastState = {
+    trend:    null,
+    trendLvl: null,
+    alert:    null,       /* nivel máximo: 'ok' | 'warn' | 'danger' */
+    dir:      null,       /* texto cardinal actual, ej. 'NNE · 32°' */
+    gustCtx:  null,       /* texto de contexto de ráfaga */
+  };
+
+  /* Contadores de confirmación — se incrementan si el candidato
+     coincide con el anterior, se resetean si cambia. */
+  const _pending = {
+    trend: { val: null, lvl: null, count: 0 },
+    alert: { val: null, count: 0 },
+    dir:   { val: null, count: 0 },
+    gustCtx: { val: null, count: 0 },
+  };
+
+  /**
+   * Registra un nuevo candidato para `key`.
+   * Devuelve el valor confirmado (puede ser el anterior si aún no se confirma).
+   * @param {string} key   Clave en _pending
+   * @param {*}      val   Nuevo valor candidato
+   * @param {*}      extra Valor secundario opcional (p.ej. nivel de tendencia)
+   * @returns {{ confirmed: boolean, val: *, extra: * }}
+   */
+  function _confirm(key, val, extra = null) {
+    const p = _pending[key];
+    if (val === p.val) {
+      p.count++;
+    } else {
+      p.val   = val;
+      p.extra = extra;
+      p.count = 1;
+    }
+    if (p.count >= CONFIRM_STEPS) {
+      lastState[key] = val;
+      return { confirmed: true, val, extra: p.extra };
+    }
+    return { confirmed: false, val: lastState[key], extra: null };
+  }
+
+  function renderAlerts() {
+    const alerts  = detectAlerts();
+    const zone    = document.getElementById('alert-zone');
+    const dot     = document.getElementById('status-dot');
+
+    /* Calcular nivel máximo actual */
+    const level   = alerts.some(a => a.level === 'danger') ? 'danger'
+                  : alerts.some(a => a.level === 'warn')   ? 'warn'
+                  : 'ok';
+
+    /* Solo redibujar si el nivel confirmó cambio */
+    const { confirmed } = _confirm('alert', level);
+    if (!confirmed && lastState.alert !== null) return;
+
+    zone.innerHTML = '';
+    if (level === 'danger')      { dot.classList.add('pulse-alert'); }
+    else if (level === 'warn')   { dot.style.background='#d07a10'; dot.classList.remove('pulse-alert'); }
+    else                         { dot.style.background='#1D9E75'; dot.classList.remove('pulse-alert'); }
+
+    alerts.forEach(a => {
+      const el = document.createElement('div');
+      el.className = `alert-banner ${a.level}`;
+      el.innerHTML = `<span class="alert-icon">${a.icon}</span><span>${a.msg}</span>`;
+      zone.appendChild(el);
+    });
+    lastState.alert = level;
+  }
+
+  /* ── Animación de viento ── */
+  function renderWindAnim(speed, deg) {
+    const container = document.getElementById('wind-anim');
+    container.innerHTML = '';
+    if (speed === 0) return;
+    const count = Math.min(2 + Math.floor(speed / 4), 12);
+    const dur   = Math.max(0.4, 1.6 - speed * 0.018);
+    const col   = windColorHex(speed);
+    /* Las rayas se mueven en la dirección hacia donde sopla el viento.
+       deg es la dirección de ORIGEN, así que las partículas viajan a deg+180.
+       Rotamos el contenedor a (deg+180)-90 = deg+90. */
+    container.style.transform = `rotate(${deg + 90}deg)`;
+    for (let i = 0; i < count; i++) {
+      const el    = document.createElement('div');
+      el.className = 'wstreak';
+      const len   = 12 + Math.random() * 22;
+      const cx    = -10 + Math.random() * 88;
+      const cy    = 10  + Math.random() * 88;
+      const dist  = 40 + Math.random() * 40;
+      const delay = (Math.random() * dur * 1.2).toFixed(2);
+      el.style.cssText = `
+        width:${len}px; top:${cy}px; left:${cx}px;
+        background:${col};
+        --streak-dist:${dist}px;
+        animation: streak ${dur}s ${delay}s linear infinite;
+      `;
+      container.appendChild(el);
+    }
+  }
+
+  /* ── Suavizado de dirección (interpolación exponencial) ─────
+     Factor 0.25: cada llamada avanza un 25% hacia el nuevo valor.
+     Más reactivo que 0.3 — percepción más viva del cambio.
+     El arco más corto [-180, +180] garantiza que un giro de
+     359° → 1° pase por 0°, no por 180°.
+  ──────────────────────────────────────────────────────────── */
+  let _lastDir = null;
+
+  function smoothDir(newDir) {
+    if (_lastDir === null) return (_lastDir = newDir);
+    let diff = newDir - _lastDir;
+    if (diff >  180) diff -= 360;
+    if (diff < -180) diff += 360;
+    _lastDir += diff * 0.25;
+    _lastDir  = ((_lastDir % 360) + 360) % 360;
+    return _lastDir;
+  }
+
+  /* ── Contexto de ráfaga ─────────────────────────────────────
+     Compara la ráfaga actual con la velocidad media de los
+     últimos 4 períodos (≈ 1 hora) para detectar irregularidad.
+
+     DOS MÉTRICAS combinadas:
+
+     1. gustFactor(r) = g / max(v, 1)
+        Ratio físico instantáneo: cuántas veces supera la ráfaga
+        a la velocidad media del mismo período.
+        > 2.0  → evento turbulento (WMO: "gusty")
+        > 1.5  → viento inestable
+        ≤ 1.5  → régimen laminar
+
+     2. ratio = g_last / avg_v_1h
+        Compara la ráfaga actual con la media de la última hora.
+        Detecta si la ráfaga es anómala respecto al contexto reciente.
+
+     Se usa el peor de los dos indicadores para el diagnóstico final.
+  ──────────────────────────────────────────────────────────── */
+
+  /** Ratio físico instantáneo ráfaga / velocidad media del período. */
+  function gustFactor(r) {
+    return r.g / Math.max(r.v, 1);
+  }
+
+  /**
+   * Diagnóstico del factor de ráfaga con escala estándar:
+   *   Gf < 1.3          → Limpio      (flujo laminar)
+   *   1.3 ≤ Gf < 1.8    → Movido      (ráfagas notables)
+   *   1.8 ≤ Gf < 2.5    → Turbulento  (colapsos posibles)
+   *   Gf ≥ 2.5          → Peligro     (colapsos probables)
+   *
+   * Se muestra el Gf numérico para que el piloto tenga el dato crudo.
+   * @returns {{ txt, color, icon, gf }}
+   */
+  function gustContext() {
+    const last  = data15.at(-1);
+    const gf    = gustFactor(last);
+
+    let txt, color, icon;
+
+    if (gf >= 2.5) {
+      txt = 'Peligro (Gf ' + gf.toFixed(2) + ')';  color = '#7a0000';  icon = '🔴';
+    } else if (gf >= 2.0) {
+      txt = 'Turbulento (Gf ' + gf.toFixed(2) + ')';  color = '#cc2a2a';  icon = '⚡';
+    } else if (gf >= 1.8) {
+      txt = 'Turbulento (Gf ' + gf.toFixed(2) + ')';  color = '#d07a10';  icon = '⚠️';
+    } else if (gf >= 1.3) {
+      txt = 'Movido (Gf ' + gf.toFixed(2) + ')';  color = '#b8a800';  icon = '〰️';
+    } else {
+      txt = 'Limpio (Gf ' + gf.toFixed(2) + ')';  color = '#1D9E75';  icon = '✓';
+    }
+
+    return { txt, color, icon, gf };
+  }
+
+  /* ── Tarjeta viento — paleta de card por nivel ── */
+  const CARD_PALETTE = {
+    'wc-calm':   { border:'rgba(29,158,117,.35)',  shadow:'0 0 0 3px rgba(29,158,117,.08)',   halo:'rgba(29,158,117,.08)',   haloBorder:'rgba(29,158,117,.3)' },
+    'wc-light':  { border:'rgba(74,170,60,.35)',   shadow:'0 0 0 3px rgba(74,170,60,.08)',    halo:'rgba(74,170,60,.08)',    haloBorder:'rgba(74,170,60,.3)' },
+    'wc-mod':    { border:'rgba(184,168,0,.4)',    shadow:'0 0 0 3px rgba(184,168,0,.1)',     halo:'rgba(184,168,0,.1)',     haloBorder:'rgba(184,168,0,.35)' },
+    'wc-fresh':  { border:'rgba(208,122,16,.45)',  shadow:'0 0 0 3px rgba(208,122,16,.12)',   halo:'rgba(208,122,16,.1)',   haloBorder:'rgba(208,122,16,.4)' },
+    'wc-strong': { border:'rgba(204,42,42,.5)',    shadow:'0 0 0 4px rgba(204,42,42,.14)',    halo:'rgba(204,42,42,.1)',    haloBorder:'rgba(204,42,42,.45)' },
+    'wc-storm':  { border:'rgba(122,0,0,.6)',      shadow:'0 0 0 5px rgba(122,0,0,.18)',      halo:'rgba(122,0,0,.12)',     haloBorder:'rgba(122,0,0,.5)' },
+  };
+
+  /* ── Inercia visual global ──────────────────────────────────
+     _displaySpeed mantiene el valor "suavizado" del número de
+     velocidad mostrado. En cada actualización se desliza un 20%
+     hacia el valor real — evita saltos bruscos y da sensación
+     de instrumento analógico respondiendo a la medición.
+     SMOOTH = 0.2: converge en ~3 actualizaciones (~90 s).
+  ──────────────────────────────────────────────────────────── */
+  const SMOOTH = 0.2;
+  let _displaySpeed = null;
+
+  let _prevGust = null;  /* para detectar cambio real de ráfaga */
+
+  /* ── Tarjeta viento ── */
+  function updateCurrentWind() {
+    const last  = data15[data15.length - 1];
+    const prev  = data15.length > 1 ? data15[data15.length - 2] : null;
+    const daily = calcDailyStats();
+
+    const spdCls  = windColorClass(last.v);
+    const gustCls = windColorClass(last.g);
+    const pal     = CARD_PALETTE[gustCls] || CARD_PALETTE['wc-calm'];
+
+    /* ── Velocidad con inercia visual ── */
+    _displaySpeed = _displaySpeed === null
+      ? last.v
+      : _displaySpeed + (last.v - _displaySpeed) * SMOOTH;
+    const displayV = Math.round(_displaySpeed);
+
+    const speedEl = document.getElementById('cur-speed');
+    speedEl.textContent = displayV;
+    speedEl.className   = 'wind-speed ' + windColorClass(displayV);
+
+    safeSet('cur-wind-label', windLabel(displayV));
+    /* Dirección en texto: confirmada antes de actualizar el DOM */
+    const dirTxt    = last.dir + ' · ' + last.d + '°';
+    const dConfirm  = _confirm('dir', dirTxt);
+    safeSet('cur-dir-lbl', dConfirm.val ?? dirTxt);
+
+    /* ── Ráfaga: flash solo si el valor cambió ── */
+    const gustEl  = document.getElementById('cur-gust');
+    const haloEl  = document.getElementById('gust-halo');
+    gustEl.textContent = last.g;
+    gustEl.className   = 'wind-speed ' + gustCls;
+
+    if (_prevGust !== null && last.g !== _prevGust) {
+      gustEl.classList.remove('gust-flash');
+      void gustEl.offsetWidth;              /* fuerza reflow para reiniciar animación */
+      gustEl.classList.add('gust-flash');
+    }
+    _prevGust = last.g;
+
+    /* Halo de ráfaga */
+    haloEl.style.background   = pal.halo;
+    haloEl.style.borderColor  = pal.haloBorder;
+
+    /* ── Contexto de ráfaga ── */
+    const dEl  = document.getElementById('cur-gust-delta');
+    const gctx = gustContext();
+    const gConfirm = _confirm('gustCtx', gctx.txt);
+    dEl.textContent = gConfirm.val ? gConfirm.val : (gctx.icon + ' ' + gctx.txt);
+    /* Color: actualizar siempre — es una transición CSS suave */
+    dEl.style.color = gctx.color;
+
+    /* ── Barra de ráfaga ── */
+    const pct = daily.maxGust > 0 ? Math.round((last.g / daily.maxGust) * 100) : 0;
+    document.getElementById('gust-bar').style.width      = pct + '%';
+    document.getElementById('gust-bar').style.background = windColorHex(last.g);
+    safeSet('gust-bar-label', pct + ' % del máx. diario');
+
+    /* ── Borde dinámico de la tarjeta (según ráfaga) ── */
+    const card = document.getElementById('wind-card');
+    card.style.borderColor = pal.border;
+    card.style.boxShadow   = pal.shadow;
+
+    /* ── Brújula: suavizado + CSS spring transition ── */
+    const smoothed = smoothDir(last.d);
+    document.getElementById('compass-arrow').style.transform = `rotate(${smoothed}deg)`;
+    document.getElementById('compass-arrow-tip').style.fill  = windColorHex(last.v);
+    document.getElementById('compass-svg').setAttribute('aria-label',
+      'Brújula — viento del ' + last.dir + ' a ' + last.d + '°');
+
+    /* ── Dot de estado: color según nivel de ráfaga ── */
+    const dot = document.getElementById('status-dot');
+    dot.style.setProperty('--live-color',
+      last.g >= 39 ? 'rgba(204,42,42,.7)' :
+      last.g >= 20 ? 'rgba(208,122,16,.7)' :
+                     'rgba(29,158,117,.6)');
+    dot.style.background = windColorHex(last.g);
+
+    /* ── Animación de rayas (dirección suavizada) ── */
+    renderWindAnim(last.v, smoothed);
+  }
+
+  /* ── Estadísticas + temperatura ── */
+  /* ── Racha máxima última hora ────────────────────────────────
+     Filtra los últimos 4 registros de 15 min (= 1 h exacta)
+     y devuelve la ráfaga más alta del intervalo.
+  ──────────────────────────────────────────────────────────── */
+  function gustMaxLastHour() {
+    const slice = data15.slice(-4);
+    return Math.max(...slice.map(r => r.g));
+  }
+
+  /* ── Percentil 90 de velocidad ───────────────────────────────
+     Ordena todos los registros del día de menor a mayor y
+     devuelve el valor que deja el 90 % por debajo.
+     Interpretación: el 10 % del tiempo el viento superó este valor.
+  ──────────────────────────────────────────────────────────── */
+  /* ── Percentil 90 genérico ───────────────────────────────────
+     Acepta cualquier array de números. Copia antes de ordenar
+     para no mutar el original.
+  ──────────────────────────────────────────────────────────── */
+  function p90(values) {
+    const s = [...values].sort((a, b) => a - b);
+    return s[Math.floor(s.length * 0.9)];
+  }
+
+  function percentile90() {
+    return p90(data15.map(r => r.v));
+  }
+
+  /* ── Sector dominante (mejor que media vectorial para UI) ────
+     Divide la rosa en 16 sectores de 22.5° y acumula la velocidad
+     en cada uno. El sector con mayor energía acumulada es el
+     predominante — más robusto que la media vectorial cuando hay
+     bimodalidad (p.ej. terral + brisa).
+     Devuelve { idx, card, deg } del sector ganador.
+  ──────────────────────────────────────────────────────────── */
+  function dominantSector(rows) {
+    const bins = Array(16).fill(0);
+    rows.forEach(r => {
+      const idx = Math.round(r.d / 22.5) % 16;
+      bins[idx] += r.v;                 /* peso = velocidad (energía lineal) */
+    });
+    const maxIdx = bins.indexOf(Math.max(...bins));
+    const deg    = Math.round(maxIdx * 22.5);
+    const card   = degreesToCardinal(deg);
+    return { idx: maxIdx, card, deg };
+  }
+
+  /* ── Detección de eventos meteorológicos ─────────────────────
+     Compara el último registro con el anterior para detectar
+     tres tipos de eventos instantáneos:
+
+       gustFront  → salto de ráfaga > 12 km/h entre períodos.
+                    Indica frente de ráfaga o microburst incipiente.
+
+       shear      → cambio de dirección > 45° entre períodos.
+                    Cizalladura horizontal: frente, turbonada, giro.
+
+       drop       → velocidad actual < 50% de la anterior.
+                    Caída súbita: eye wall, downburst, calma forzada.
+
+     Retorna { gustFront, shear, drop } como booleanos.
+     Requiere al menos 2 registros; si no, devuelve todo false.
+  ──────────────────────────────────────────────────────────── */
+  function detectEvents(rows) {
+    if (rows.length < 2) return { gustFront: false, shear: false, drop: false };
+    const last = rows.at(-1);
+    const prev = rows.at(-2);
+
+    /* Cizalladura: arco más corto para no confundir 359°→1° con 358° */
+    let dirDiff = Math.abs(last.d - prev.d);
+    if (dirDiff > 180) dirDiff = 360 - dirDiff;
+
+    return {
+      gustFront: last.g - prev.g > 12,
+      shear:     dirDiff > 45,
+      drop:      prev.v > 0 && last.v < prev.v * 0.5
+    };
+  }
+
+  /* ── Índice de turbulencia (TI) — versión pro ───────────────
+     Mejoras respecto a la versión básica:
+       • Ventana de 12 registros (~3h) en lugar de 8 (~2h):
+         más estable, menos sensible a picos puntuales.
+       • Filtro de calma: si avg < 2 km/h el viento es tan débil
+         que la desviación típica es ruido puro, no turbulencia.
+         Se devuelve 0 para evitar falsos positivos.
+       • Salida redondeada a 2 decimales con el operador unario +
+         para mantener tipo number (no string).
+
+     Fórmula: TI = σ / μ   (desviación típica / media)
+
+     Rangos orientativos en tierra (IEC 61400-1):
+       TI < 0.10  → flujo laminar
+       TI 0.10–0.20 → turbulencia leve-moderada (normal)
+       TI 0.20–0.35 → turbulencia notable
+       TI > 0.35  → turbulencia intensa (aviso)
+  ──────────────────────────────────────────────────────────── */
+  function turbulence() {
+    const vs  = data15.slice(-12).map(r => r.v);
+    const avg = vs.reduce((a, b) => a + b, 0) / vs.length;
+    if (avg < 2) return 0;   /* calma: evitar ruido */
+    const dev = Math.sqrt(vs.reduce((a, v) => a + (v - avg) ** 2, 0) / vs.length);
+    return +(dev / avg).toFixed(2);
+  }
+
+  function _turbLabel(ti) {
+    if (ti < 0.10) return { txt: 'Leve', cls: 'wc-calm' };
+    if (ti < 0.20) return { txt: 'Moderada', cls: 'wc-light' };
+    if (ti < 0.35) return { txt: 'Notable', cls: 'wc-fresh' };
+    return { txt: 'Intensa', cls: 'wc-strong' };
+  }
+
+  /* ── Viento efectivo en ladera ───────────────────────────────
+     windComponent(dir, slopeDir, speed):
+       Proyecta el vector de viento sobre la normal de la ladera.
+       diff  = ángulo entre dirección del viento y orientación
+               de la ladera (siempre en [0°, 180°])
+       factor = cos(diff): +1 si perfecto de cara, 0 si lateral,
+               -1 si perfecto de cola.
+       Retorna la componente útil en km/h:
+         > 0  → viento de cara (favorable para vuelo)
+         = 0  → viento lateral puro
+         < 0  → viento de cola (desfavorable / peligroso)
+
+     Notas:
+       • El viento meteorológico indica DE DÓNDE viene.
+         Para calcular la componente de cara, lo que importa es
+         si el viento SOPLA HACIA la ladera, es decir si la
+         dirección del viento coincide con la orientación de la ladera.
+       • Se compara la dirección del viento (de donde viene) con
+         slopeDir+180 (hacia donde apunta la ladera desde abajo).
+  ──────────────────────────────────────────────────────────── */
+  function windComponent(windDir, slopeDir, speed) {
+    /* La ladera "mira" a slopeDir. El viento entra de cara si viene
+       de la dirección opuesta a la ladera (slopeDir+180). */
+    let diff = Math.abs(windDir - ((slopeDir + 180) % 360));
+    if (diff > 180) diff = 360 - diff;
+    const factor = Math.cos(diff * Math.PI / 180);
+    return +(speed * factor).toFixed(1);
+  }
+
+  /**
+   * Actualiza la tarjeta de viento efectivo en ladera.
+   * Llama a windComponent con el último dato y la orientación
+   * seleccionada en #slope-dir-select.
+   */
+  /* ── Ventana de vuelo ────────────────────────────────────────
+     Clasifica el estado del viento en cuatro categorías basadas
+     en la velocidad media (v) y la ráfaga máxima (g):
+
+       'weak'   → v < 8 km/h: viento insuficiente para sostener
+       'good'   → 8 ≤ v ≤ 20 km/h y g < 28: ventana óptima
+       'strong' → fuera del rango bueno pero sin ráfaga crítica
+       'danger' → g > 35 km/h: peligroso independientemente de v
+
+     Nota: estos umbrales son válidos para vuelo libre (parapente,
+     ala delta) en condiciones medias. Ajustar según certificación
+     del aparato y perfil de la ladera.
+  ──────────────────────────────────────────────────────────── */
+  function flightWindow(v, g) {
+    if (g > 35)           return 'danger';
+    if (v < 8)            return 'weak';
+    if (v <= 20 && g < 28) return 'good';
+    return 'strong';
+  }
+
+  const FW_UI = {
+    weak:   { icon:'🔵', label:'Viento débil',  bg:'#e8f4fd', border:'#6bb3e8', color:'#1a5a9a', detail:'< 8 km/h — insuficiente para sustentación' },
+    good:   { icon:'🟢', label:'Ventana óptima', bg:'#e6f9f1', border:'#5DCAA5', color:'#0F6E56', detail:'8–20 km/h · ráfaga < 28 — condiciones de vuelo' },
+    strong: { icon:'🟡', label:'Viento fuerte',  bg:'#fff8e1', border:'#f0c030', color:'#7a5c00', detail:'> 20 km/h o ráfaga 28–35 — límite técnico' },
+    danger: { icon:'🔴', label:'Peligroso',      bg:'#fdecea', border:'#e05050', color:'#7a1515', detail:'Ráfaga > 35 km/h — NO volar' },
+  };
+
+  /* ── Detección de ciclos de viento ──────────────────────────
+     Un ciclo térmico o de viento se manifiesta como una
+     oscilación periódica de la velocidad. Comparando el último
+     registro con el de hace 4 períodos (~1h) se detecta si el
+     viento está en la fase de entrada (subida) o de calma/caída.
+
+     Umbrales:
+       Δv > +4 km/h (vs. hace ~1h) → ciclo entrando (ascenso)
+       Δv < −4 km/h                → ciclo cayendo (calma)
+       |Δv| ≤ 4 km/h               → régimen estable, sin ciclo claro
+
+     'rows' debe tener al menos 5 elementos para comparar.
+     Si hay menos datos, se devuelve 'stable'.
+  ──────────────────────────────────────────────────────────── */
+  function detectCycle(rows) {
+    if (rows.length < 5) return 'stable';
+    const last = rows.at(-1);
+    const prev = rows.at(-5);   /* hace 4 períodos ≈ 1 hora */
+    const delta = last.v - prev.v;
+    if (delta >  4) return 'up';
+    if (delta < -4) return 'down';
+    return 'stable';
+  }
+
+  const CYCLE_UI = {
+    up:     { icon:'🔼', label:'Ciclo entrando', bg:'#e6f9f1', border:'#5DCAA5', color:'#0F6E56' },
+    down:   { icon:'🔽', label:'Ciclo cayendo',  bg:'#fff0ea', border:'#e09070', color:'#8a3010' },
+    stable: { icon:'➡️',  label:'Sin ciclo claro', bg:'var(--bg-secondary)', border:'var(--border)', color:'var(--text-secondary)' },
+  };
+
+  /* ── Cizalladura horizontal ──────────────────────────────────
+     Cambio de dirección entre el último y penúltimo período.
+     Usa el arco más corto [0°, 180°] para evitar que un giro
+     de 359°→1° aparezca como 358° en lugar de 2°.
+
+     Umbrales operativos para vuelo libre:
+       < 20°  → cizalladura nula, sin riesgo
+       20–45° → cizalladura leve, precaución en transiciones
+       45–90° → cizalladura moderada, vuelo técnico
+       > 90°  → cizalladura severa, peligro real de colapso
+  ──────────────────────────────────────────────────────────── */
+  function windShear(rows) {
+    if (rows.length < 2) return 0;
+    const last = rows.at(-1);
+    const prev = rows.at(-2);
+    let diff = Math.abs(last.d - prev.d);
+    if (diff > 180) diff = 360 - diff;   /* arco más corto */
+    return diff;
+  }
+
+  function shearUI(deg) {
+    if (deg < 20)  return { icon:'🟢', bg:'#e6f9f1', border:'#5DCAA5', color:'#0F6E56', label:'Nula' };
+    if (deg < 45)  return { icon:'🟡', bg:'#fff8e1', border:'#f0c030', color:'#7a5c00', label:'Leve' };
+    if (deg < 90)  return { icon:'🟠', bg:'#fff0ea', border:'#e09070', color:'#8a3010', label:'Moderada' };
+    return           { icon:'🔴', bg:'#fdecea', border:'#e05050', color:'#7a1515', label:'Severa' };
+  }
+
+  /* ── Estabilidad de dirección ────────────────────────────────
+     Desviación típica CIRCULAR de los últimos N ángulos.
+     La versión aritmética (Σ(d−avg)²) falla en el límite 0°/360°:
+     un viento oscilando entre 355° y 5° daría dev ≈ 177° aunque
+     el viento sea perfectamente estable. La versión circular usa
+     la media del vector unitario (R̄) para medir la dispersión:
+       σ_circular = sqrt(−2 · ln(R̄))    [Mardia & Jupp, 2000]
+     devuelve grados [0, ∞).
+
+     Interpretación para vuelo libre:
+       < 15°  → Estable  (dirección limpia, ideal)
+       15–30° → Variable (oscilaciones normales)
+       > 30°  → Inestable (dirección turbulenta, precaución)
+  ──────────────────────────────────────────────────────────── */
+  function dirStability(rows) {
+    if (rows.length < 2) return 0;
+    const rads = rows.map(r => r.d * Math.PI / 180);
+    const sx   = rads.reduce((a, r) => a + Math.cos(r), 0) / rads.length;
+    const sy   = rads.reduce((a, r) => a + Math.sin(r), 0) / rads.length;
+    const R    = Math.sqrt(sx * sx + sy * sy);   /* longitud del vector medio [0,1] */
+    /* R=1 → todos los ángulos iguales (σ=0); R→0 → máxima dispersión */
+    const sigma = R < 1 ? Math.sqrt(-2 * Math.log(Math.max(R, 1e-9))) : 0;
+    return +(sigma * 180 / Math.PI).toFixed(1);   /* convertir a grados */
+  }
+
+  function dirStabilityUI(deg) {
+    if (deg < 15)  return { icon:'🟢', label:'Estable',   bg:'#e6f9f1', border:'#5DCAA5', color:'#0F6E56' };
+    if (deg < 30)  return { icon:'🟡', label:'Variable',  bg:'#fff8e1', border:'#f0c030', color:'#7a5c00' };
+    return           { icon:'🔴', label:'Inestable', bg:'#fdecea', border:'#e05050', color:'#7a1515' };
+  }
+
+  function updateWindComponent() {
+    const last      = data15.at(-1);
+    const slopeDir  = parseInt(document.getElementById('slope-dir-select').value, 10);
+    const useful    = windComponent(last.d, slopeDir, last.v);
+    const gustUseful = windComponent(last.d, slopeDir, last.g);
+
+    /* Ángulo entre viento y ladera [0°, 180°] */
+    let angle = Math.abs(last.d - ((slopeDir + 180) % 360));
+    if (angle > 180) angle = 360 - angle;
+    angle = Math.round(angle);
+
+    /* Etiquetas */
+    const usefulEl = document.getElementById('wind-useful');
+    const usefulLbl = document.getElementById('wind-useful-label');
+    const angleEl  = document.getElementById('wind-angle');
+    const angleLbl = document.getElementById('wind-angle-label');
+    const decEl    = document.getElementById('flight-decision');
+    const rsnEl    = document.getElementById('flight-reason');
+
+    usefulEl.textContent = useful > 0 ? '+' + useful : useful;
+    usefulEl.style.color = useful > 0 ? '#1D9E75'
+                         : useful < 0 ? '#cc2a2a'
+                         : '#b8a800';
+
+    /* Ángulo */
+    angleEl.textContent = angle + '°';
+
+    if (angle <= 30)        angleLbl.textContent = 'Casi de cara';
+    else if (angle <= 70)   angleLbl.textContent = 'Diagonal favorable';
+    else if (angle <= 110)  angleLbl.textContent = 'Lateral';
+    else if (angle <= 150)  angleLbl.textContent = 'Diagonal de cola';
+    else                    angleLbl.textContent = 'De cola';
+
+    /* Decisión de vuelo */
+    const ti = turbulence();
+    const gf = gustFactor(last);
+    let decision, reason, dColor;
+
+    if (useful < 0) {
+      decision = '🔴 NO VOLAR';
+      reason   = 'Viento de cola — riesgo de barrido en despegue';
+      dColor   = '#cc2a2a';
+    } else if (last.g > 35 || gf > 2.2 || ti > 0.35) {
+      decision = '🟠 PRECAUCIÓN';
+      reason   = last.g > 35 ? `Ráfagas ${last.g} km/h` : ti > 0.35 ? `Turbulencia intensa (TI ${ti})` : `Gf ${gf.toFixed(1)} — muy irregular`;
+      dColor   = '#d07a10';
+    } else if (useful < 3) {
+      decision = '🟡 MARGINAL';
+      reason   = 'Viento útil muy débil — posible deriva lateral';
+      dColor   = '#b8a800';
+    } else if (useful >= 3 && useful <= 25 && angle <= 60) {
+      decision = '🟢 FAVORABLE';
+      reason   = `${useful} km/h de cara · ${angle}° · Bft ${beaufort(last.v)}`;
+      dColor   = '#1D9E75';
+    } else {
+      decision = '🟡 MARGINAL';
+      reason   = angle > 60 ? 'Ángulo elevado — componente lateral significativa' : `Viento fuerte (${last.v} km/h)`;
+      dColor   = '#b8a800';
+    }
+
+    decEl.textContent   = decision;
+    decEl.style.color   = dColor;
+    rsnEl.textContent   = reason;
+    usefulLbl.textContent = `Ráfaga útil: ${gustUseful > 0 ? '+' + gustUseful : gustUseful} km/h`;
+
+    /* ── Ventana de vuelo ── */
+    const fw    = flightWindow(last.v, last.g);
+    const fwUI  = FW_UI[fw];
+    const fwBadge  = document.getElementById('flight-window-badge');
+    const fwDetail = document.getElementById('flight-window-detail');
+    fwBadge.textContent        = fwUI.icon + ' ' + fwUI.label;
+    fwBadge.style.background   = fwUI.bg;
+    fwBadge.style.borderColor  = fwUI.border;
+    fwBadge.style.color        = fwUI.color;
+    fwDetail.textContent       = fwUI.detail;
+
+    /* ── Ciclo de viento ── */
+    const cycle   = detectCycle(data15);
+    const cycUI   = CYCLE_UI[cycle];
+    const cycEl   = document.getElementById('cycle-badge');
+    cycEl.textContent       = cycUI.icon + ' ' + cycUI.label;
+    cycEl.style.background  = cycUI.bg;
+    cycEl.style.borderColor = cycUI.border;
+    cycEl.style.color       = cycUI.color;
+
+    /* ── Cizalladura ── */
+    const shear   = windShear(data15);
+    const shrUI   = shearUI(shear);
+    const shrEl   = document.getElementById('shear-badge');
+    shrEl.textContent       = shrUI.icon + ' Cizalladura: ' + Math.round(shear) + '°';
+    shrEl.style.background  = shrUI.bg;
+    shrEl.style.borderColor = shrUI.border;
+    shrEl.style.color       = shrUI.color;
+
+    /* ── Estabilidad de dirección ── */
+    const dirStab  = dirStability(data15.slice(-8));
+    const dsUI     = dirStabilityUI(dirStab);
+    const dsEl     = document.getElementById('dir-stability-badge');
+    dsEl.textContent       = dsUI.icon + ' Dir. ' + dsUI.label + ': ±' + dirStab + '°';
+    dsEl.style.background  = dsUI.bg;
+    dsEl.style.borderColor = dsUI.border;
+    dsEl.style.color       = dsUI.color;
+  }
+
+  /* Redibujar al cambiar la orientación */
+  /* slope-dir-select change → manejado por App.bindEvents() */
+
+  function updateStats() {
+    const daily  = calcDailyStats();
+    const badges = calcBadges();
+
+    safeSet('stat-tmp-cur', daily.tmpCur.toFixed(1) + ' °C');
+    safeSet('stat-tmp-min', daily.tmpMin.toFixed(1) + ' °C');
+    safeSet('stat-tmp-max', daily.tmpMax.toFixed(1) + ' °C');
+
+    const avgEl = document.getElementById('stat-avg-vel');
+    avgEl.textContent  = daily.avgVel + ' km/h';
+    avgEl.className    = windColorClass(daily.avgVel);
+    avgEl.style.fontWeight = '500';
+
+    safeSet('stat-vel-range', daily.maxVel + ' / ' + daily.minVel + ' km/h');
+
+    const gEl = document.getElementById('stat-max-gust');
+    gEl.textContent  = daily.maxGust + ' km/h';
+    gEl.className    = windColorClass(daily.maxGust);
+    gEl.style.fontWeight = '500';
+
+    /* Dirección: sector dominante (energía) + media vectorial entre paréntesis */
+    const dom = dominantSector(data15);
+    safeSet('stat-dir-prev', dom.card + ' · ' + dom.deg + '°  (vec. ' + daily.vecCard + ')');
+
+    /* ── Métricas pro ── */
+    const g1h   = gustMaxLastHour();
+    const g1hEl = document.getElementById('stat-gust-1h');
+    g1hEl.textContent  = g1h + ' km/h';
+    g1hEl.className    = windColorClass(g1h);
+    g1hEl.style.fontWeight = '500';
+
+    const p90   = percentile90();
+    const p90El = document.getElementById('stat-p90');
+    p90El.textContent  = p90 + ' km/h';
+    p90El.className    = windColorClass(p90);
+    p90El.style.fontWeight = '500';
+
+    const ti     = turbulence();
+    const tiInfo = _turbLabel(ti);
+    const tiEl   = document.getElementById('stat-turb');
+    tiEl.textContent  = tiInfo.txt + ' (' + ti.toFixed(2) + ')';
+    tiEl.className    = tiInfo.cls;
+    tiEl.style.fontWeight = '500';
+
+    safeSet('badge-avg15',
+      'Promedio 15min: ' + badges.avg15 + ' km/h' +
+      (badges.n15 > 0 ? ' (' + badges.n15 + ' muestras)' : ''));
+    safeSet('badge-max-day', 'Diario máx: '    + badges.maxDay + ' km/h');
+    /* Tendencia: solo actualizar DOM si el nivel confirmó 2 veces seguidas */
+    const tConfirm = _confirm('trend', badges.trend, badges.level);
+    const tEl = document.getElementById('badge-trend');
+    tEl.textContent = tConfirm.val ?? badges.trend;
+    tEl.className   = 'badge badge-tend ' + (tConfirm.extra ?? badges.level);
+  }
+
+  /* ── Modo Piloto — lógica combinada ─────────────────────────
+     flightStatus combina todas las métricas en un único veredicto:
+
+       'no-fly'  → viento útil insuficiente (< 5 km/h de cara)
+       'danger'  → Gf > 2.2 O cizalladura > 50° (peligro real)
+       'good'    → útil > 10 km/h Y Gf < 1.8 (ventana óptima)
+       'marginal'→ cualquier otra combinación (precaución)
+
+     Prioridad: danger > no-fly > good > marginal.
+  ──────────────────────────────────────────────────────────── */
+  /* ── Sistema de score ponderado para decisión de vuelo ───────
+     Cada variable contribuye al score con +/− puntos.
+     La suma total da una puntuación objetiva que se traduce
+     en GO / MARGINAL / NO GO.
+
+     Variables y pesos:
+       Viento útil (+1 a +3)  → base de la decisión
+       Factor ráfaga (+2/+1/−2) → calidad del flujo
+       Cizalladura (−2 si >50°) → riesgo de cambio brusco
+       Estabilidad dir. (+2/−1) → coherencia del flujo
+
+     Umbrales de decisión (calibrados para vuelo libre):
+       ≥ 6 → GO       (condiciones favorables)
+       ≥ 3 → MARGINAL (vuelo posible con precaución)
+       < 3 → NO GO    (condiciones insuficientes o peligrosas)
+
+     Hardstop: si gf > 2.2 o shear > 50 el score se lleva a
+     −99 independientemente del resto — una sola condición
+     peligrosa anula cualquier puntuación positiva.
+  ──────────────────────────────────────────────────────────── */
+  /* ── Tendencia de velocidad ──────────────────────────────────
+     Compara el último registro con el de hace 4 períodos (~1h).
+     Misma ventana que detectCycle pero usando umbral ±2 km/h
+     para ser más sensible que los ±4 km/h del ciclo.
+     'up'   → viento subiendo: ciclo entrando o brisa desarrollándose
+     'down' → viento cayendo: pérdida de ciclo o frente pasando
+     'flat' → estable dentro del ruido de medición
+  ──────────────────────────────────────────────────────────── */
+  function windTrend(rows) {
+    if (rows.length < 5) return 'flat';
+    const last = rows.at(-1).v;
+    const prev = rows.at(-5).v;
+    if (last > prev + 2) return 'up';
+    if (last < prev - 2) return 'down';
+    return 'flat';
+  }
+
+  function flightScore(rows, slopeDir) {
+    const last  = rows.at(-1);
+    const eff   = windComponent(last.d, slopeDir, last.v);
+    const gf    = gustFactor(last);
+    const shear = windShear(rows);
+    const stab  = dirStability(rows.slice(-8));
+
+    /* Hardstop — condición peligrosa anula todo */
+    if (gf > 2.2 || shear > 50 || regimeChange(rows)) return -99;
+
+    let score = 0;
+
+    /* Viento útil */
+    if      (eff > 12) score += 3;
+    else if (eff >  8) score += 2;
+    else if (eff >  5) score += 1;
+
+    /* Factor ráfaga */
+    if      (gf < 1.5) score += 2;
+    else if (gf < 2.0) score += 1;
+    else               score -= 2;
+
+    /* Cizalladura */
+    if (shear > 50)  score -= 2;
+    else if (shear > 30) score -= 1;
+
+    /* Estabilidad de dirección */
+    if      (stab < 15) score += 2;
+    else if (stab > 30) score -= 1;
+
+    /* Tendencia de velocidad — clave en vuelo
+       Bajando + útil débil: ciclo perdiéndose, ventana cerrándose
+       Subiendo: ciclo desarrollándose o brisa creciendo */
+    const trend = windTrend(rows);
+    if (trend === 'down' && eff < 8) score -= 2;
+    if (trend === 'up')              score += 1;
+
+    return score;
+  }
+
+  function flightDecision(score) {
+    if (score >= 6) return 'go';
+    if (score >= 3) return 'marginal';
+    return 'no-go';
+  }
+
+  const FS_PANEL = {
+    'go':      { icon:'🟢', label:'GO — VOLABLE',    bg:'rgba(29,158,117,.08)',  border:'#1D9E75' },
+    'marginal':{ icon:'🟡', label:'MARGINAL',         bg:'rgba(184,168,0,.07)',   border:'#b8a800' },
+    'no-go':   { icon:'🔴', label:'NO GO',            bg:'rgba(204,42,42,.08)',   border:'#cc2a2a' },
+  };
+
+  /* ── Análisis específico de sitio: Madroño ───────────────────
+     El patrón de viento en Madroño tiene tres fases típicas
+     observadas en los datos del 22 Mar 2026:
+
+       MAÑANA  (07:30–10:30):  NE limpio, 5–11 km/h, estable
+         → Brisa de ladera en desarrollo, buenas condiciones
+         → Dir. predominante NNE→NE, poca variabilidad
+
+       TRANSICIÓN (10:30–13:00): variable, giros NW/WNW
+         → Convección iniciándose, dirección oscila
+         → Velocidad cae y rebota, inicio de ciclos térmicos
+
+       TARDE (13:00–15:15): giro hacia S/SSE, velocidad baja
+         → Masa de aire diferente, posible convergencia térmica
+         → Riesgo de turbulencia en ladera N/NE (rotores)
+
+     La función analiza los datos actuales para determinar
+     en qué fase estamos y qué implica para el vuelo.
+
+     Criterios de fase (derivados de los datos reales):
+       • Fase mañana:     dir vectorial NNE–NE (315°–65°), TI < 0.15
+       • Fase transición: alta variabilidad (dirStab > 20°) o
+                          velocidad cayendo (ciclo 'down') con dir. errática
+       • Fase tarde:      giro > 120° respecto a NE base (dir. media > 90°)
+                          o presencia de S/SSE (135°–220°)
+  ──────────────────────────────────────────────────────────── */
+  /* ── Detector de cambio de régimen ──────────────────────────
+     Compara la dirección actual con la de hace 8 períodos (~2h).
+     Un giro > 90° en 2 horas indica un cambio de masa de aire,
+     no una oscilación normal de brisa.
+
+     En Madroño el patrón típico es NE matinal → giro S por la tarde.
+     Ese giro de ~130°–180° es la señal del cambio de régimen:
+     - La masa de aire fría nocturna ha calentado y se invierte
+     - El gradiente térmico ladera→valle se revierte
+     - Riesgo de convergencia y rotores en la zona de despegue NE
+
+     Usa el arco más corto para evitar falsos positivos 0°/360°.
+  ──────────────────────────────────────────────────────────── */
+  function regimeChange(rows) {
+    if (rows.length < 9) return false;
+    let diff = Math.abs(rows.at(-1).d - rows.at(-9).d);
+    if (diff > 180) diff = 360 - diff;
+    return diff > 90;
+  }
+
+  function madronoSiteAnalysis() {
+    const vecDeg   = vectorMeanDir(data15);   /* dirección media vectorial del día */
+    const ds       = dirStability(data15.slice(-8));
+    const ti       = turbulence();
+    const cycle    = detectCycle(data15);
+    const last     = data15.at(-1);
+
+    /* Normalizar ángulo de divergencia respecto al NE base (45°) */
+    let divFromNE = Math.abs(vecDeg - 45);
+    if (divFromNE > 180) divFromNE = 360 - divFromNE;
+
+    /* ── Clasificación de fase ── */
+    let phase, icon, bg, border, color, desc;
+
+    const isSoutherly  = (last.d >= 135 && last.d <= 225);
+    const isVariable   = ds > 20 || divFromNE > 60;
+    const isNE         = divFromNE <= 40 && ds < 20 && ti < 0.20;
+    const hasRegChange = regimeChange(data15);   /* cambio de masa en últimas ~2h */
+
+    /* Cambio de régimen: prioridad máxima — anula cualquier otra fase */
+    if (hasRegChange) {
+      phase  = 'CAMBIO DE RÉGIMEN';
+      icon   = '⚠️';
+      bg     = '#fdecea'; border = '#e05050'; color = '#7a1515';
+      desc   = 'Giro > 90° en 2h — cambio de masa de aire. Posible convergencia y rotores. NO VOLAR hasta estabilización.';
+    } else if (isSoutherly) {
+      phase  = 'TARDE — Giro S';
+      icon   = '🔴';
+      bg     = '#fdecea'; border = '#e05050'; color = '#7a1515';
+      desc   = 'Cambio de masa de aire. Posible convergencia térmica y rotores en ladera N/NE. Precaución extrema.';
+    } else if (isVariable || (cycle === 'down' && divFromNE > 30)) {
+      phase  = 'TRANSICIÓN TÉRMICA';
+      icon   = '🟡';
+      bg     = '#fff8e1'; border = '#f0c030'; color = '#7a5c00';
+      desc   = 'Convección iniciándose. Dirección oscilando, ciclos irregulares. Ventana se cierra.';
+    } else if (isNE) {
+      phase  = 'MAÑANA — NE Limpio';
+      icon   = '🟢';
+      bg     = '#e6f9f1'; border = '#5DCAA5'; color = '#0F6E56';
+      desc   = 'Brisa de ladera NE estable. Condiciones típicas de vuelo matinal en Madroño.';
+    } else {
+      phase  = 'RÉGIMEN MIXTO';
+      icon   = '🟡';
+      bg     = '#fff8e1'; border = '#f0c030'; color = '#7a5c00';
+      desc   = 'Fuera de patrón habitual. Evaluar en tiempo real antes de despegar.';
+    }
+
+    return { phase, icon, bg, border, color, desc };
+  }
+
+  /* ── Tipo de vuelo dominante ─────────────────────────────────
+     Clasifica el vuelo en función de la fuente de energía que
+     lo sostiene en ese momento:
+
+       'dynamic'  → viento de ladera (dinámico)
+                    Condición: componente útil > 8 km/h
+                    Y ángulo viento/ladera < 30° (casi de cara)
+                    El vuelo depende de la velocidad y orientación.
+                    Estable mientras el viento sea constante.
+
+       'thermal'  → térmica (ascendente convectivo)
+                    Condición: ciclo activo ('up') Y viento < 10 km/h
+                    El viento es demasiado débil para dinámico.
+                    El vuelo depende de los ciclos solares.
+                    Sensible a turbulencia convectiva.
+
+       'mixed'    → combinación o indefinido
+                    Ni claramente dinámico ni claramente térmico.
+                    Puede ser viento cruzado + térmica (más turbulento)
+                    o viento moderado con ciclos (más imprevisible).
+                    Requiere más experiencia del piloto.
+
+     Nota: 'thermal' solo se activa con ciclo === 'up', no 'stable'.
+     Un ciclo cayendo con viento débil NO es térmico aprovechable.
+  ──────────────────────────────────────────────────────────── */
+  function flightType(rows, slopeDir) {
+    const last  = rows.at(-1);
+    const eff   = windComponent(last.d, slopeDir, last.v);
+    const cycle = detectCycle(rows);
+
+    /* Ángulo entre viento y ladera (arco más corto) */
+    let angle = Math.abs(last.d - ((slopeDir + 180) % 360));
+    if (angle > 180) angle = 360 - angle;
+
+    if (eff > 8 && angle < 30)           return 'dynamic';
+    if (cycle === 'up' && last.v < 10)   return 'thermal';
+    return 'mixed';
+  }
+
+  const FT_UI = {
+    dynamic: { icon:'🌬️', label:'Dinámico',  color:'#378ADD', detail:'Vuelo de ladera. Constante mientras el viento aguante.' },
+    thermal: { icon:'☀️',  label:'Térmico',   color:'#d07a10', detail:'Ciclo activo. Viento débil — vuelo convectivo.' },
+    mixed:   { icon:'🔀',  label:'Mixto',     color:'#6b6b67', detail:'Combinación dinámica + térmica. Mayor experiencia requerida.' },
+  };
+
+  function updateFlightStatus() {
+    const slopeDir = parseInt(document.getElementById('slope-dir-select').value, 10);
+    const score    = flightScore(data15, slopeDir);
+    const decision = flightDecision(score);
+    const ui       = FS_PANEL[decision];
+    const last     = data15.at(-1);
+
+    /* Panel principal */
+    const panel = document.getElementById('pilot-panel');
+    panel.style.borderColor = ui.border;
+    panel.style.background  = ui.bg;
+    safeSet('ps-icon', ui.icon);
+    /* Label incluye el score numérico para transparencia */
+    safeSet('ps-label', ui.label + (score > -99 ? ' (' + score + 'pts)' : ' — HARDSTOP'));
+
+    /* ── ZONA A: métricas operativas ── */
+    document.getElementById('pilot-zone-a').style.background = ui.bg;
+
+    /* Tipo de vuelo en línea secundaria */
+    const ft    = flightType(data15, slopeDir);
+    const ftUI  = FT_UI[ft];
+    safeSet('ps-type-line', ftUI.icon + ' ' + ftUI.label);
+
+    /* Score numérico */
+    safeSet('ps-score', score > -99 ? score + ' / 10' : '⛔');
+    document.getElementById('ps-score').style.color = ui.border;
+
+    /* Viento útil — declarado aquí, usado en Zona A y Zona B */
+    const eff = windComponent(last.d, slopeDir, last.v);
+
+    const effEl = document.getElementById('op-useful');
+    effEl.textContent = (eff > 0 ? '+' : '') + eff + ' km/h';
+    effEl.style.color = eff >= 8 ? '#1D9E75' : eff >= 5 ? '#b8a800' : '#cc2a2a';
+
+    /* Ráfagas operativo */
+    const gfOp = gustFactor(last);
+    const opGustTxt = gfOp >= 2.5 ? 'Peligrosas'
+                    : gfOp >= 2.0 ? 'Fuertes'
+                    : gfOp >= 1.8 ? 'Moderadas'
+                    : gfOp >= 1.3 ? 'Ligeras'
+                    : 'Suaves';
+    const opGustEl = document.getElementById('op-gusts');
+    opGustEl.textContent = opGustTxt;
+    opGustEl.style.color = gfOp >= 2.0 ? '#cc2a2a' : gfOp >= 1.3 ? '#d07a10' : '#1D9E75';
+
+    /* Tendencia operativa */
+    const trend = windTrend(data15);
+    const opTrendTxt = trend === 'up' ? '↑ Subiendo' : trend === 'down' ? '↓ Bajando' : '→ Estable';
+    const opTrendEl  = document.getElementById('op-trend');
+    opTrendEl.textContent = opTrendTxt;
+    opTrendEl.style.color = trend === 'up' ? '#1D9E75' : trend === 'down' ? '#cc2a2a' : '#6b6b67';
+
+    /* ── ZONA B: Viento útil (usa eff ya declarado) ── */
+    safeSet('ps-useful', (eff > 0 ? '+' : '') + eff + ' km/h');
+    document.getElementById('ps-useful').style.color =
+      eff > 0 ? '#1D9E75' : eff < 0 ? '#cc2a2a' : '#b8a800';
+
+    /* Ráfagas */
+    const gf = gustFactor(last);
+    const gfLbl = gf >= 2.5 ? 'Peligro'
+                : gf >= 2.0 ? 'Turbulento'
+                : gf >= 1.8 ? 'Turbulento'
+                : gf >= 1.3 ? 'Movido'
+                : 'Limpias';
+    safeSet('ps-gusts', gfLbl + ' (Gf ' + gf.toFixed(2) + ')');
+
+    /* Dirección */
+    const ds    = dirStability(data15.slice(-8));
+    const dsLbl = ds < 15 ? 'Estable' : ds < 30 ? 'Variable' : 'Inestable';
+    safeSet('ps-dir', dsLbl + ' ±' + ds + '°');
+
+    /* Turbulencia */
+    const ti    = turbulence();
+    const tiLbl = _turbLabel(ti).txt;
+    safeSet('ps-turb', tiLbl + ' (' + ti + ')');
+
+    /* Ciclo + tendencia */
+    const cyc   = detectCycle(data15);
+    const cycTxt = cyc === 'up' ? '🔼 Entrando' : cyc === 'down' ? '🔽 Cayendo' : '→ Estable';
+    const trendTxt = trend === 'up' ? ' ↑' : trend === 'down' ? ' ↓' : '';
+    safeSet('ps-cycle', cycTxt + trendTxt);
+
+    /* Cizalladura */
+    const sh   = windShear(data15);
+    const shLbl = sh < 20 ? 'Nula' : sh < 45 ? 'Leve' : sh < 90 ? 'Moderada' : 'Severa';
+    safeSet('ps-shear', shLbl + ' (' + Math.round(sh) + '°)');
+
+    /* ── Tipo de vuelo (ft/ftUI ya calculados arriba) ── */
+    const ftEl = document.getElementById('ps-flight-type');
+    ftEl.textContent = ftUI.icon + ' ' + ftUI.label;
+    ftEl.style.color = ftUI.color;
+    ftEl.title       = ftUI.detail;
+
+    /* ── Análisis de sitio Madroño ── */
+    const site = madronoSiteAnalysis();
+    const spBadge = document.getElementById('site-phase-badge');
+    const spDesc  = document.getElementById('site-phase-desc');
+    spBadge.textContent       = site.icon + ' ' + site.phase;
+    spBadge.style.background  = site.bg;
+    spBadge.style.borderColor = site.border;
+    spBadge.style.color       = site.color;
+    spDesc.textContent        = site.desc;
+  }
+
+  /* ============================================================
+     METEO — capa de lógica meteorológica pura
+     ============================================================
+     Todas las funciones de cálculo agrupadas en un namespace.
+     No toca el DOM, no lee IDs, no escribe textContent.
+     Resultado: reutilizable desde API, backend, app móvil o tests.
+
+     Las funciones globales originales (calcDailyStats, turbulence,
+     etc.) siguen existiendo como delegados para no romper el código
+     existente que las llama. Nuevos módulos deben usar Meteo.*
+     ============================================================ */
+  const Meteo = {
+
+    /* ── Dirección ──────────────────────────────────────────── */
+
+    /** Media vectorial ponderada por v² (energía cinética). */
+    vectorMeanDir:    (rows)        => vectorMeanDir(rows),
+
+    /** Sector dominante por acumulación de energía. */
+    dominantSector:   (rows)        => dominantSector(rows),
+
+    /** Desviación típica circular en grados. */
+    dirStability:     (rows)        => dirStability(rows),
+
+    /** Suavizado de series angulares para gráficos. */
+    smoothDirSeries:  (arr)         => smoothDirectionSeries(arr),
+
+    /** Normaliza cualquier ángulo a [0, 360). */
+    normalizeDir:     (d)           => ((d % 360) + 360) % 360,
+
+    /** Detector de cambio de régimen (giro >90° en ~2h). */
+    regimeChange:     (rows)        => regimeChange(rows),
+
+    /** Cizalladura entre últimos dos registros (arco más corto). */
+    windShear:        (rows)        => windShear(rows),
+
+    /* ── Velocidad ──────────────────────────────────────────── */
+
+    /** Estadísticas del día completo. */
+    dailyStats:       ()            => calcDailyStats(),
+
+    /** Percentil 90 genérico sobre array de números. */
+    p90:              (values)      => p90(values),
+
+    /** P90 de velocidad sobre data15. */
+    percentile90:     ()            => percentile90(),
+
+    /** Ráfaga máxima de la última hora. */
+    gustMaxHour:      ()            => gustMaxLastHour(),
+
+    /* ── Índice de turbulencia ──────────────────────────────── */
+
+    /** TI = σ/μ sobre últimos 12 registros; filtra calma (<2 km/h). */
+    turbulence:       ()            => turbulence(),
+
+    /* ── Ráfaga y factor de ráfaga ─────────────────────────── */
+
+    /** Gf = g / max(v, 1). */
+    gustFactor:       (r)           => gustFactor(r),
+
+    /**
+     * Diagnóstico completo de ráfaga.
+     * @returns {{ txt, color, icon, gf }}
+     */
+    gustContext:      ()            => gustContext(),
+
+    /* ── Tendencia y ciclos ─────────────────────────────────── */
+
+    /** Tendencia doble escala (short vs long MA). */
+    badges:           ()            => calcBadges(),
+
+    /**
+     * Tendencia de velocidad punto a punto.
+     * @returns {'up'|'down'|'flat'}
+     */
+    windTrend:        (rows)        => windTrend(rows),
+
+    /**
+     * Ciclo de viento (comparación ~1h atrás).
+     * @returns {'up'|'down'|'stable'}
+     */
+    detectCycle:      (rows)        => detectCycle(rows),
+
+    /**
+     * Detección de eventos instantáneos.
+     * @returns {{ gustFront, shear, drop }}
+     */
+    detectEvents:     (rows)        => detectEvents(rows),
+
+    /* ── Análisis de sitio Madroño ──────────────────────────── */
+
+    /** Fase del día y cambio de régimen específico de Madroño. */
+    madronoAnalysis:  ()            => madronoSiteAnalysis(),
+
+    /* ── Vuelo ──────────────────────────────────────────────── */
+
+    /**
+     * Componente útil del viento respecto a la orientación de ladera.
+     * Positivo = de cara, negativo = de cola.
+     */
+    windComponent:    (d, slope, v) => windComponent(d, slope, v),
+
+    /**
+     * Ventana de vuelo por umbrales de velocidad y ráfaga.
+     * @returns {'weak'|'good'|'strong'|'danger'}
+     */
+    flightWindow:     (v, g)        => flightWindow(v, g),
+
+    /**
+     * Score ponderado de condiciones de vuelo (0–10, −99 = hardstop).
+     */
+    flightScore:      (rows, slope) => flightScore(rows, slope),
+
+    /**
+     * Decisión GO/MARGINAL/NO-GO a partir del score.
+     * @returns {'go'|'marginal'|'no-go'}
+     */
+    flightDecision:   (score)       => flightDecision(score),
+
+    /**
+     * Tipo de vuelo dominante.
+     * @returns {'dynamic'|'thermal'|'mixed'}
+     */
+    flightType:       (rows, slope) => flightType(rows, slope),
+
+    /* ── Función compuesta: todo en una llamada ─────────────── */
+
+    /**
+     * calcWindMetrics(rows, slopeDir)
+     * ──────────────────────────────────────────────────────────
+     * Calcula todas las métricas meteorológicas relevantes
+     * en una sola llamada. Retorna un objeto plano sin referencias
+     * al DOM — apto para serialización JSON, envío a API, logging.
+     *
+     * @param {Array}  rows      array de registros {v,g,d,dir,tmp,r,ts}
+     * @param {number} slopeDir  orientación de ladera en grados
+     * @returns {Object} métricas completas
+     */
+    calcWindMetrics(rows, slopeDir = 180) {
+      if (!rows || rows.length === 0) return null;
+      const last  = rows.at(-1);
+      const daily = calcDailyStats();
+      const bdg   = calcBadges();
+      const gf    = gustFactor(last);
+      const ti    = turbulence();
+      const shear = windShear(rows);
+      const ds    = dirStability(rows.slice(-8));
+      const eff   = windComponent(last.d, slopeDir, last.v);
+      const score = flightScore(rows, slopeDir);
+
+      return {
+        /* Estado actual */
+        current: {
+          v:       last.v,
+          g:       last.g,
+          d:       last.d,
+          dir:     last.dir,
+          tmp:     last.tmp,
+          bft:     beaufort(last.v),
+          label:   windLabel(last.v),
+        },
+        /* Estadísticas del día */
+        daily: {
+          avgVel:      daily.avgVel,
+          maxVel:      daily.maxVel,
+          minVel:      daily.minVel,
+          maxGust:     daily.maxGust,
+          vecDir:      daily.vecDeg,
+          vecCard:     daily.vecCard,
+          domSector:   dominantSector(rows),
+          tmpCur:      daily.tmpCur,
+          tmpMin:      daily.tmpMin,
+          tmpMax:      daily.tmpMax,
+          p90:         p90(rows.map(r => r.v)),
+          gustHour:    gustMaxLastHour(),
+        },
+        /* Calidad del flujo */
+        flow: {
+          gustFactor:     +gf.toFixed(2),
+          turbulence:     ti,
+          shear:          +shear.toFixed(1),
+          dirStability:   +ds.toFixed(1),
+          regimeChange:   regimeChange(rows),
+        },
+        /* Tendencia */
+        trend: {
+          level:   bdg.level,
+          txt:     bdg.trend,
+          diff:    bdg.diff,
+          cycle:   detectCycle(rows),
+          windTrend: windTrend(rows),
+        },
+        /* Vuelo */
+        flight: {
+          eff:       +eff.toFixed(1),
+          window:    flightWindow(last.v, last.g),
+          score,
+          decision:  flightDecision(score),
+          type:      flightType(rows, slopeDir),
+        },
+        /* Eventos */
+        events: detectEvents(rows),
+        /* Metadatos */
+        meta: {
+          n:       rows.length,
+          lastTs:  last.ts ?? null,
+          lastT:   last.t,
+        }
+      };
+    }
+  };
+
+  /* ── Entrada única ── */
+  /* ── Safe DOM helpers ─────────────────────────────────────────
+     $ (id)                → getElementById (alias corto)
+     setText(id, val)      → alias de safeSet — nunca lanza si el ID no existe
+     safeSet(id, val)      → textContent seguro
+     safeHtml(id, html)    → innerHTML seguro
+     safeStyle(id, p, v)   → style[prop] seguro
+     safeCls(id, cls)      → className seguro
+     safeAttr(id, a, v)    → setAttribute seguro
+  ──────────────────────────────────────────────────────────── */
+  function $(id)                        { return document.getElementById(id); }
+  function setText(id, val)             { const e = $(id); if (e) e.textContent = val; }
+  function safeSet(id, val)             { const e = $(id); if (e) e.textContent = val; }
+  function safeHtml(id, html)           { const e = $(id); if (e) e.innerHTML   = html; }
+  function safeStyle(id, prop, val)     { const e = $(id); if (e) e.style[prop] = val; }
+  function safeCls(id, cls)             { const e = $(id); if (e) e.className   = cls; }
+  function safeAttr(id, attr, val)      { const e = $(id); if (e) e.setAttribute(attr, val); }
+
+  function updateAll() { App.warm(); renderAlerts(); updateCurrentWind(); updateStats(); updateWindComponent(); updateFlightStatus(); }
+
+  /* ============================================================
+     INIT — se llama al final del script, después de que todas
+     las variables y funciones estén declaradas.
+     ============================================================ */
+
+  /* ============================================================
+     BLOQUE 9 — injectLiveData(record)
+     ============================================================
+     Función pública que acepta un registro nuevo y actualiza
+     TODOS los componentes del dashboard:
+
+     DATOS EN TIEMPO REAL (cada llamada):
+       • data15      → buffer circular de registros de 15 min
+       • allHourly   → array histórico para gráficos
+       • Tabla tbl15 → columna nueva añadida al final
+
+     DATOS HISTÓRICOS (automático al cambiar de hora):
+       • dataH       → agrega la hora anterior y añade entrada
+       • Tabla tblH  → columna nueva de la hora cerrada
+
+     CONTRATO DEL PARÁMETRO `record`:
+     ─────────────────────────────────
+     {
+       t:    string   // etiqueta de hora, p.ej. '15:30' (auto si omitido)
+       v:    number   // velocidad media (km/h)
+       g:    number   // ráfaga máxima (km/h)
+       d:    number   // dirección en grados [0–360]
+       dir:  string   // cardinal, p.ej. 'NNE'
+       tmp:  number   // temperatura (°C)
+       r?:   number   // precipitación (mm), opcional — default 0
+       hour?: boolean // true si es hora en punto (resalte en tabla)
+     }
+
+     USO DESDE CONSOLA:
+       injectLiveData({ t:'15:30', v:6, g:12, d:195, dir:'SSO', tmp:21.8 });
+
+     POLLING CON FETCH:
+       setInterval(async () => {
+         const d = await fetch('https://api.estacion.com/live/...').then(r=>r.json());
+         injectLiveData({ t:d.time, v:d.windspeedkmh, g:d.windgustkmh,
+                          d:d.winddir, dir:d.winddir_str, tmp:d.temp_c, r:d.rain_mm });
+       }, 15 * 60 * 1000);
+     ============================================================ */
+
+  const DATA15_MAX = 200;
+  let _activeZoom  = 8;
+  let _lastHourKey = null;   /* 'HH' de la última hora procesada como registro horario */
+  let _hourBucket  = [];     /* registros 15-min de la hora en curso para agregar */
+
+  /* _activeZoom se sincroniza desde App.setZoom — no necesita listener propio */
+
+  function _fmtTime(date) {
+    return date.toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' });
+  }
+
+  /* ── Añadir columna a cualquier tabla htable ── */
+  function _appendTableColumn(tableId, col) {
+    const tbl  = document.getElementById(tableId);
+    if (!tbl || !tbl.rows.length) return;
+    const keys = ['t', 'v', 'g', 'arrow', 'dir_deg', 'tmp'];
+    for (let ri = 0; ri < tbl.rows.length; ri++) {
+      const td  = tbl.rows[ri].insertCell(-1);
+      if      (col.day)  td.className = 'col-day';
+      else if (col.hour) td.className = 'col-hour';
+      switch (keys[ri]) {
+        case 't':       td.textContent = col.t; break;
+        case 'v':       td.textContent = col.v; break;
+        case 'g':       td.classList.add('gust'); td.textContent = col.g; break;
+        case 'arrow':   td.style.padding = '3px 8px'; td.innerHTML = arrowSvg(col.d); break;
+        case 'dir_deg': td.classList.add('dir-txt'); td.textContent = col.dir + ' ' + col.d + '°'; break;
+        case 'tmp':     td.textContent = col.tmp.toFixed(1); break;
+      }
+    }
+    const wrap = tbl.closest('.tbl-wrap');
+    if (wrap) wrap.scrollLeft = wrap.scrollWidth;
+  }
+
+  /* ── Agrega los registros del bucket en un único registro horario ──
+     Usa media aritmética para velocidad/temp, máximo para ráfaga,
+     y media vectorial ponderada para dirección. */
+  function _aggregateHour(bucket) {
+    if (!bucket.length) return null;
+    const n    = bucket.length;
+    const avgV = Math.round(bucket.reduce((a, r) => a + r.v, 0) / n);
+    const maxG = Math.max(...bucket.map(r => r.g));
+    const avgT = parseFloat((bucket.reduce((a, r) => a + r.tmp, 0) / n).toFixed(1));
+    const vecD = vectorMeanDir(bucket);
+    const dirD = Math.round(vecD);
+    const dirC = degreesToCardinal(vecD);
+    /* Etiqueta: hora de la primera muestra, redondeada a la hora */
+    const hLabel = bucket[0].t.slice(0, 2) + 'h';
+    return { t: hLabel, v: avgV, g: maxG, d: dirD, dir: dirC, tmp: avgT, r: 0, hour: true };
+  }
+
+  /* ── Patch gráficos sin reconstruir ── */
+  function _patchCharts() {
+    UI.patchCharts(App.state);
+  }
+
+  /* ── Timestamp dinámico con tiempo transcurrido ─────────────
+     _lastUpdateMs  → epoch ms del último dato recibido
+     _lastUpdateHHMM → hora formateada 'HH:MM' del último dato
+     _tsInterval    → setInterval que refresca el DOM cada 15s
+
+     _relTime(ms) → texto relativo: 'ahora mismo', 'hace 1 min', etc.
+     _updateTimestamp(t) → guarda la hora y arranca / reinicia el ticker
+  ──────────────────────────────────────────────────────────── */
+  let _lastUpdateMs   = null;
+  let _lastUpdateHHMM = null;
+  let _tsInterval     = null;
+
+  function _relTime(ms) {
+    const sec = Math.round((Date.now() - ms) / 1000);
+    if (sec < 15)  return 'ahora mismo';
+    if (sec < 60)  return 'hace ' + sec + ' s';
+    const min = Math.round(sec / 60);
+    if (min === 1) return 'hace 1 min';
+    if (min < 60)  return 'hace ' + min + ' min';
+    const hr = Math.round(min / 60);
+    if (hr  === 1) return 'hace 1 h';
+    return 'hace ' + hr + ' h';
+  }
+
+  function _renderTimestamp() {
+    if (!_lastUpdateMs) return;
+    document.getElementById('last-update-ts').innerHTML =
+      'Actualizado ' + _relTime(_lastUpdateMs) +
+      ' &nbsp;·&nbsp; ' + _lastUpdateHHMM;
+  }
+
+  function _updateTimestamp(t) {
+    _lastUpdateMs   = Date.now();
+    _lastUpdateHHMM = t;
+    _renderTimestamp();
+
+    /* Reiniciar ticker para que el primer salto sea instantáneo */
+    if (_tsInterval) clearInterval(_tsInterval);
+    _tsInterval = setInterval(_renderTimestamp, 15000);
+  }
+
+  /* ─────────────────────────────────────────────────────────────
+     FUNCIÓN PRINCIPAL
+     ───────────────────────────────────────────────────────────── */
+  function injectLiveData(record) {
+    /* 1. Validar */
+    const required = ['v', 'g', 'd', 'dir', 'tmp'];
+    const missing  = required.filter(k => record[k] === undefined);
+    if (missing.length) throw new Error('[injectLiveData] Faltan campos: ' + missing.join(', '));
+
+    /* 2. Normalizar */
+    const rec = {
+      t:    record.t   ?? _fmtTime(new Date()),
+      v:    Number(record.v),
+      g:    Number(record.g),
+      d:    Number(record.d),
+      dir:  record.dir,
+      tmp:  Number(record.tmp),
+      r:    Number(record.r  ?? 0),
+      hour: record.hour ?? false,
+      ts:   record.ts   ?? Date.now(),   /* timestamp unix ms — para avg15 real */
+    };
+
+    /* 3. Buffer data15 */
+    data15.push(rec);
+    if (data15.length > DATA15_MAX) data15.shift();
+
+    /* 4. allHourly para gráficos */
+    allHourly.push({ t: rec.t, v: rec.v, g: rec.g, d: rec.d, r: rec.r });
+
+    /* 5. Tabla tbl15 */
+    _appendTableColumn('tbl15', rec);
+
+    /* 6. ── AGREGACIÓN HORARIA → dataH + tblH ──────────────────
+       Se compara la hora actual con la última hora procesada.
+       Cuando cambia la hora, se cierra el bucket anterior,
+       se genera un registro horario agregado y se añade a dataH
+       y a la tabla tblH. */
+    const hourKey = rec.t.slice(0, 2);   /* 'HH' */
+
+    if (_lastHourKey === null) {
+      /* Primera llamada: inicializar bucket y clave */
+      _lastHourKey = hourKey;
+    }
+
+    if (hourKey !== _lastHourKey && _hourBucket.length > 0) {
+      /* La hora cambió → cerrar bucket y agregar */
+      const hourRec = _aggregateHour(_hourBucket);
+      if (hourRec) {
+        dataH.push(hourRec);
+        allHourly.push({ t: hourRec.t, v: hourRec.v, g: hourRec.g, d: hourRec.d, r: hourRec.r });
+        _appendTableColumn('tblH', hourRec);
+      }
+      _hourBucket  = [];
+      _lastHourKey = hourKey;
+    }
+
+    _hourBucket.push(rec);   /* acumular para el siguiente cierre */
+
+    /* 7. Timestamp */
+    _updateTimestamp(rec.t);
+
+    /* 8. Gráficos */
+    _patchCharts();
+
+    /* 9. Tarjetas, alertas, estadísticas */
+    updateAll();
+
+    return rec;
+  }
+
+  /* ── Inicializar gráficos ANTES del simulador ── */
+  /* (movido a _init() con try/catch) */
+
+  const DEMO_INTERVAL_MS = 4000;
+  const DIRS = ['N','NNE','NE','ENE','E','ESE','SE','SSE',
+                'S','SSO','SO','OSO','O','ONO','NO','NNO'];
+
+  /* ── Escenarios ─────────────────────────────────────────── */
+  const SCENARIOS = [
+    {
+      label: 'NE Limpio — mañana',
+      target: { v: 10, g: 14, d: 42,  tmp: 12.0 },
+      noise:  { v: 0.3, g: 0.5, d: 3,   tmp: 0.05 },
+      steps:  12
+    },
+    {
+      label: 'Brisa fuerte NE',
+      target: { v: 16, g: 22, d: 55,  tmp: 14.5 },
+      noise:  { v: 0.4, g: 0.8, d: 4,   tmp: 0.07 },
+      steps:  8
+    },
+    {
+      label: 'Transición térmica — mediodía',
+      target: { v: 5,  g: 10, d: 320, tmp: 18.0 },
+      noise:  { v: 0.4, g: 0.7, d: 6,   tmp: 0.08 },
+      steps:  10
+    },
+    {
+      label: 'Ráfaga fuerte — Gf alto',
+      target: { v: 6,  g: 22, d: 295, tmp: 19.5 },
+      noise:  { v: 0.3, g: 1.2, d: 4,   tmp: 0.05 },
+      steps:  6
+    },
+    {
+      label: 'Cizalladura — giro brusco S',
+      target: { v: 4,  g: 9,  d: 178, tmp: 21.0 },
+      noise:  { v: 0.3, g: 0.5, d: 5,   tmp: 0.07 },
+      steps:  8
+    },
+    {
+      label: 'Giro S — cambio de régimen',
+      target: { v: 3,  g: 8,  d: 185, tmp: 22.5 },
+      noise:  { v: 0.2, g: 0.4, d: 3,   tmp: 0.06 },
+      steps:  10
+    },
+    {
+      label: 'Calma — viento débil',
+      target: { v: 2,  g: 4,  d: 200, tmp: 22.0 },
+      noise:  { v: 0.2, g: 0.3, d: 3,   tmp: 0.05 },
+      steps:  6
+    },
+    {
+      label: 'Recovery — vuelta al NE',
+      target: { v: 7,  g: 12, d: 40,  tmp: 19.0 },
+      noise:  { v: 0.3, g: 0.5, d: 4,   tmp: 0.06 },
+      steps:  10
+    }
+  ];
+
+  /* ── Estado interno del motor ───────────────────────────── */
+  const _eng = {
+    scIdx:  0,                             /* escenario activo */
+    tick:   0,                             /* ticks en este escenario */
+    v:      data15[data15.length - 1].v,
+    g:      data15[data15.length - 1].g,
+    d:      data15[data15.length - 1].d,
+    tmp:    data15[data15.length - 1].tmp,
+    wallStep: 0                            /* contador global de ticks */
+  };
+
+  /** Ruido gaussiano aproximado (Box-Muller simplificado). */
+  function _gauss(sigma) {
+    return (Math.random() + Math.random() + Math.random() - 1.5) * sigma * 1.5;
+  }
+
+  /** Interpolación angular por el arco más corto. */
+  function _lerpDirEngine(cur, tgt, alpha) {
+    let diff = tgt - cur;
+    if (diff >  180) diff -= 360;
+    if (diff < -180) diff += 360;
+    return ((cur + diff * alpha) + 360) % 360;
+  }
+
+  function _engineTick() {
+    const sc    = SCENARIOS[_eng.scIdx];
+    const alpha = 0.08;   /* interpolación suave — avanza 8% hacia target por tick */
+
+    /* ── Límite del 10% por tick ──────────────────────────────
+       Cada variable no puede cambiar más del 10% de su valor
+       actual (o un mínimo absoluto para valores pequeños) entre
+       un tick y el siguiente. Esto replica el comportamiento real
+       de una estación que muestrea cada 15 minutos.
+       Los valores pequeños (v < 5) tienen margen absoluto fijo
+       para evitar que el 10% se vuelva insignificante. */
+    const _cap = (cur, next, pct = 0.10, minAbs = 0.5) => {
+      const maxDelta = Math.max(Math.abs(cur) * pct, minAbs);
+      return Math.max(cur - maxDelta, Math.min(cur + maxDelta, next));
+    };
+
+    /* Velocidad */
+    const rawV  = _eng.v + (_eng.v < sc.target.v ? 1 : -1) *
+                  Math.abs(_eng.v - sc.target.v) * alpha + _gauss(sc.noise.v);
+    _eng.v      = Math.max(0, Math.min(60, _cap(_eng.v, rawV)));
+
+    /* Ráfaga — mínimo = velocidad; máximo cap 10% */
+    const rawG  = _eng.g + (_eng.g < sc.target.g ? 1 : -1) *
+                  Math.abs(_eng.g - sc.target.g) * alpha + _gauss(sc.noise.g);
+    _eng.g      = Math.max(_eng.v, Math.min(80, _cap(_eng.g, rawG)));
+
+    /* Dirección — cap en 10° absolutos por tick (≈ 5% de 180°) */
+    const rawD  = _lerpDirEngine(_eng.d, sc.target.d, alpha);
+    const dDiff = rawD - _eng.d;
+    const dNorm = dDiff > 180 ? dDiff - 360 : dDiff < -180 ? dDiff + 360 : dDiff;
+    _eng.d      = ((_eng.d + Math.max(-10, Math.min(10, dNorm + _gauss(sc.noise.d * 0.4)))) + 360) % 360;
+
+    /* Temperatura — cap 0.5°C por tick */
+    const rawT  = _eng.tmp + (_eng.tmp < sc.target.tmp ? 1 : -1) *
+                  Math.abs(_eng.tmp - sc.target.tmp) * alpha + _gauss(sc.noise.tmp);
+    _eng.tmp    = Math.max(-5, Math.min(45, _cap(_eng.tmp, rawT, 0.10, 0.2)));
+
+    _eng.tick++;
+    _eng.wallStep++;
+
+    /* Avanzar escenario */
+    if (_eng.tick >= sc.steps) {
+      _eng.tick  = 0;
+      _eng.scIdx = (_eng.scIdx + 1) % SCENARIOS.length;
+      console.log('[demo] → Escenario ' + _eng.scIdx + ': ' + SCENARIOS[_eng.scIdx].label);
+    }
+
+    /* Generar y publicar el dato */
+    const d = Math.round(_eng.d);
+    const now = new Date();
+    injectLiveData({
+      t:    now.toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit', second:'2-digit' }),
+      v:    Math.round(_eng.v),
+      g:    Math.round(_eng.g),
+      d,
+      dir:  DIRS[Math.round(d / 22.5) % 16],
+      tmp:  parseFloat(_eng.tmp.toFixed(1)),
+      r:    Math.random() < 0.04 ? parseFloat((Math.random() * 0.6).toFixed(1)) : 0,
+      hour: now.getMinutes() === 0 && now.getSeconds() < DEMO_INTERVAL_MS / 1000 + 1,
+      ts:   Date.now()
+    });
+  }
+
+  /* ── Arranque ────────────────────────────────────────────── */
+  function _startDemoEngine() {
+    _engineTick();                                    /* primer dato inmediato */
+    let _demoTid = setInterval(_engineTick, DEMO_INTERVAL_MS);
+
+  /* ── API de control global ──────────────────────────────── */
+  window.stopLiveDemo  = () => {
+    clearInterval(_demoTid); _demoTid = null;
+    console.log('[demo] pausado en escenario ' + _eng.scIdx + ': ' + SCENARIOS[_eng.scIdx].label);
+  };
+  window.startLiveDemo = () => {
+    if (_demoTid) return;
+    _demoTid = setInterval(_engineTick, DEMO_INTERVAL_MS);
+    console.log('[demo] reanudado');
+  };
+  window.demoNext   = () => {
+    _eng.tick = 0;
+    _eng.scIdx = (_eng.scIdx + 1) % SCENARIOS.length;
+    console.log('[demo] → ' + SCENARIOS[_eng.scIdx].label);
+    _engineTick();
+  };
+  window.demoGoto   = (n) => {
+    _eng.tick  = 0;
+    _eng.scIdx = ((n % SCENARIOS.length) + SCENARIOS.length) % SCENARIOS.length;
+    console.log('[demo] → ' + SCENARIOS[_eng.scIdx].label);
+    _engineTick();
+  };
+  window.demoStatus = () => {
+    const sc = SCENARIOS[_eng.scIdx];
+    console.table({
+      escenario: sc.label,
+      tick:      _eng.tick + '/' + sc.steps,
+      v:         Math.round(_eng.v) + ' km/h',
+      g:         Math.round(_eng.g) + ' km/h',
+      d:         Math.round(_eng.d) + '°',
+      tmp:       _eng.tmp.toFixed(1) + ' °C'
+    });
+  };
+  console.log('[demo] Motor activo · ' + SCENARIOS.length + ' escenarios · ' +
+    DEMO_INTERVAL_MS / 1000 + 's/tick · demoStatus() para ver estado');
+  } /* end _startDemoEngine */
+
+  /* ============================================================
+     APP CORE
+     ============================================================
+     Objeto central que encapsula estado y ciclo de vida.
+     Convierte el dashboard de script plano a aplicación.
+
+     App.state      → fuente única de verdad para los datos
+     App.init()     → punto de entrada — llamado en DOMContentLoaded
+     App.render()   → (re)construye tablas, gráficos y métricas
+     App.setZoom(n) → cambia el zoom de los gráficos
+     App.inject(r)  → atajo a injectLiveData()
+     App.bindEvents → eventos de UI (ladera, zoom, etc.)
+     ============================================================ */
+  /* ============================================================
+     UI — capa de presentación
+     ============================================================
+     Separa el render del estado y la lógica de negocio.
+     Recibe App.state como parámetro — no accede a variables
+     globales directamente (excepto las funciones de bajo nivel
+     ya existentes que aún no se han migrado).
+
+     UI.renderTables(state)      → reconstruye tablas HTML
+     UI.renderCharts(state)      → crea/recrea gráficos Chart.js (full rebuild)
+     UI.patchCharts(state)       → actualiza datos sin rebuild (live data)
+     UI.renderWindCard()         → tarjeta de viento + brújula
+     UI.renderPilotPanel()       → panel GO/MARGINAL/NO GO
+     UI.renderStats()            → estadísticas del día
+     UI.renderAlerts()           → zona de alertas
+     UI.renderMetrics()          → renderWindCard + renderPilotPanel + renderStats + renderAlerts
+     ============================================================ */
+  const UI = {
+
+    /* ── Tablas ─────────────────────────────────────────────── */
+    renderTables(state) {
+      buildHTable('tbl15', state.data15);
+      buildHTable('tblH',  state.dataH);
+      ['tbl15', 'tblH'].forEach(id => {
+        const wrap = $(id)?.closest('.tbl-wrap');
+        if (wrap) requestAnimationFrame(() => { wrap.scrollLeft = wrap.scrollWidth; });
+      });
+    },
+
+    /* ── Gráficos — full rebuild (zoom change, initial load) ── */
+    renderCharts(state) {
+      try { buildCharts(state.zoom); }
+      catch (e) { console.error('[UI] Charts error:', e); }
+    },
+
+    /* ── Gráficos — patch rápido (live data, sin destroy) ───── */
+    patchCharts(state) {
+      if (!charts.wind || !charts.dir || !charts.rain) {
+        return this.renderCharts(state);   /* fallback si no existen */
+      }
+      const sl  = getSlice(state.zoom);
+      const lbs = sl.map(r => r.t);
+      charts.wind.data.labels            = lbs;
+      charts.wind.data.datasets[0].data  = sl.map(r => r.v);
+      charts.wind.data.datasets[1].data  = sl.map(r => r.g);
+      charts.wind.update('active');
+      charts.dir.data.labels             = lbs;
+      charts.dir.data.datasets[0].data   = smoothDirectionSeries(sl.map(r => r.d));
+      charts.dir.update('active');
+      charts.rain.data.labels            = lbs;
+      charts.rain.data.datasets[0].data  = sl.map(r => r.r || 0);
+      charts.rain.update('active');
+    },
+
+    /* ── Tarjeta de viento + brújula ────────────────────────── */
+    renderWindCard() {
+      App.warm();
+      updateCurrentWind();
+    },
+
+    /* ── Panel piloto GO/MARGINAL/NO GO ─────────────────────── */
+    renderPilotPanel() {
+      App.warm();
+      updateWindComponent();
+      updateFlightStatus();
+    },
+
+    /* ── Estadísticas del día ───────────────────────────────── */
+    renderStats() {
+      App.warm();
+      updateStats();
+    },
+
+    /* ── Alertas dinámicas ──────────────────────────────────── */
+    renderAlerts() {
+      renderAlerts();
+    },
+
+    /* ── Render parcial de métricas (sin tablas ni gráficos) ── */
+    renderMetrics() {
+      App.warm();
+      renderAlerts();
+      updateCurrentWind();
+      updateStats();
+      updateWindComponent();
+      updateFlightStatus();
+    }
+  };
+
+  /* ── Debounce: agrupa eventos rápidos en un solo disparo ─── */
+  function debounce(fn, ms = 200) {
+    let t;
+    return (...args) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn(...args), ms);
+    };
+  }
+
+  const App = {
+
+    state: {
+      data15:     [],
+      dataH:      [],
+      allHourly:  [],
+      zoom:       8,
+      slope:      180,   /* orientación de ladera en grados */
+      refresh: {
+        mode:       'demo',
+        intervalMs: 30000,
+        _tid:       null,
+        lastFetch:  null,
+        errorCount: 0,
+      }
+    },
+
+    /* ── Caché de cálculos costosos ─────────────────────────
+       Se invalida en cada inject() / fetchData().
+       updateAll() y las funciones de render leen desde aquí
+       en lugar de recalcular en cada llamada.
+    ──────────────────────────────────────────────────────── */
+    cache: {
+      lastPoint:  null,   /* data15.at(-1) */
+      daily:      null,   /* calcDailyStats() */
+      badges:     null,   /* calcBadges() */
+      slopeDir:   null,   /* parseInt(#slope-dir-select) */
+      metrics:    null,   /* Meteo.calcWindMetrics() completo */
+      _dirty:     true,   /* fuerza recalculo en la próxima lectura */
+    },
+
+    /**
+     * Invalida la caché — llamar después de cada nuevo dato.
+     */
+    invalidateCache() {
+      this.cache._dirty   = true;
+      this.cache.lastPoint  = null;
+      this.cache.daily      = null;
+      this.cache.badges     = null;
+      this.cache.metrics    = null;
+    },
+
+    /**
+     * Rellena la caché si está sucia.
+     * updateCurrentWind, updateStats, updateFlightStatus
+     * pueden llamar a App.warm() al inicio para compartir
+     * los cálculos en lugar de repetirlos.
+     */
+    warm() {
+      if (!this.cache._dirty) return;
+      const slopeDir = parseInt($('slope-dir-select')?.value || '180', 10);
+      this.cache.lastPoint = data15.at(-1);
+      this.cache.daily     = calcDailyStats();
+      this.cache.badges    = calcBadges();
+      this.cache.slopeDir  = slopeDir;
+      this.cache.metrics   = Meteo.calcWindMetrics(data15, slopeDir);
+      this.cache._dirty    = false;
+    },
+
+    /* ── INIT ──────────────────────────────────────────────── */
+    init() {
+      console.log('INIT dashboard');
+
+      this.state.data15    = data15;
+      this.state.dataH     = dataH;
+      this.state.allHourly = allHourly;
+
+      this.bindEvents();
+      this.render();
+
+      _lastUpdateHHMM = data15[data15.length - 1].t;
+      _lastUpdateMs   = Date.now();
+      _renderTimestamp();
+      _tsInterval = setInterval(_renderTimestamp, 15000);
+
+      _startDemoEngine();   /* motor de demo — se detiene cuando arranca Holfuy */
+      startHolfuyGitHub();  /* datos reales desde GitHub Pages */
+    },
+
+    /* ── RENDER COMPLETO — delega a UI ────────────────────── */
+    render() {
+      UI.renderTables(this.state);
+      UI.renderCharts(this.state);
+      UI.renderMetrics();
+    },
+
+    /* ── ZOOM ──────────────────────────────────────────────── */
+    setZoom(n) {
+      this.state.zoom = n;
+      _activeZoom     = n;   /* sincroniza con injectLiveData/_patchCharts */
+      const btn = document.querySelector(`.zoom-btn[data-zoom="${n}"]`);
+      setZoom(btn || { classList: { add: () => {}, remove: () => {} } }, n);
+    },
+
+    /* ── INYECCIÓN DE DATO ÚNICO ───────────────────────────── */
+    inject(record) {
+      injectLiveData(record);
+      this.invalidateCache();   /* nuevo dato → caché obsoleta */
+    },
+
+    /* ── SISTEMA DE REFRESH EN TIEMPO REAL ─────────────────── */
+
+    /**
+     * Función de transformación: convierte la respuesta JSON de la API
+     * al formato interno { t, v, g, d, dir, tmp, r, ts }.
+     * Sobrescribir con la función específica de tu API.
+     */
+    transform(json) {
+      /* Implementación por defecto — adaptar a la API real */
+      const DIRS = ['N','NNE','NE','ENE','E','ESE','SE','SSE',
+                    'S','SSO','SO','OSO','O','ONO','NO','NNO'];
+      const w   = json?.data?.wind;
+      const out = json?.data?.outdoor;
+      const rf  = json?.data?.rainfall;
+      const deg = parseInt(w?.wind_direction?.value) || 0;
+      const t   = (json.time || '').slice(11, 16) ||
+                  new Date().toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' });
+      return {
+        t,
+        v:   parseFloat(w?.wind_speed?.value)    || 0,
+        g:   parseFloat(w?.wind_gust?.value)     || 0,
+        d:   deg,
+        dir: DIRS[Math.round(deg / 22.5) % 16],
+        tmp: parseFloat(out?.temperature?.value) || 0,
+        r:   parseFloat(rf?.hourly?.value)       || 0,
+        ts:  Date.now()
+      };
+    },
+
+    /**
+     * fetchData(url)
+     * ──────────────────────────────────────────────────────────
+     * Llama a la API, transforma el resultado e inyecta el dato.
+     * Con backoff exponencial en caso de error (máx. 5 min).
+     *
+     * Para usar con datos reales:
+     *   App.startLive('https://tu-dominio.com/api/ecowitt/live');
+     */
+    async fetchData(url) {
+      const rf = this.state.refresh;
+      try {
+        const res  = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        const rec  = this.transform(json);
+        this.inject(rec);
+        rf.lastFetch  = Date.now();
+        rf.errorCount = 0;
+        this.invalidateCache();
+        console.log(`[App] fetch OK — ${rec.t} v=${rec.v} g=${rec.g} d=${rec.d}°`);
+      } catch (err) {
+        rf.errorCount++;
+        const backoff = Math.min(rf.intervalMs * Math.pow(2, rf.errorCount - 1), 300000);
+        console.warn(`[App] fetchData error #${rf.errorCount}: ${err.message}. Retry in ${backoff/1000}s`);
+        /* Limpiar intervalo actual y reiniciar con backoff */
+        clearInterval(rf._tid);
+        rf._tid = setTimeout(() => {
+          rf._tid = setInterval(() => this.fetchData(url), rf.intervalMs);
+          this.fetchData(url);
+        }, backoff);
+      }
+    },
+
+    /**
+     * startLive(url, intervalMs)
+     * Arranca el polling periódico contra la API real.
+     * Detiene el motor de demo si estaba activo.
+     *
+     * @param {string} url        URL del proxy (Cloudflare Worker)
+     * @param {number} intervalMs ms entre llamadas (default 30 s)
+     */
+    startLive(url, intervalMs = 30000) {
+      const rf = this.state.refresh;
+      /* Detener motor de demo */
+      if (typeof stopLiveDemo === 'function') stopLiveDemo();
+      /* Limpiar intervalo previo */
+      clearInterval(rf._tid);
+      rf.mode       = 'live';
+      rf.intervalMs = intervalMs;
+      /* Primera llamada inmediata, luego periódica */
+      this.fetchData(url);
+      rf._tid = setInterval(() => this.fetchData(url), intervalMs);
+      console.log(`[App] Live mode activo — ${intervalMs/1000}s · ${url}`);
+    },
+
+    /**
+     * stopLive()
+     * Pausa el polling sin perder la configuración.
+     */
+    stopLive() {
+      clearInterval(this.state.refresh._tid);
+      this.state.refresh._tid  = null;
+      this.state.refresh.mode  = 'paused';
+      console.log('[App] Polling pausado');
+    },
+
+    /**
+     * refreshNow(url)
+     * Disparo manual de una actualización fuera del intervalo.
+     */
+    refreshNow(url) {
+      return this.fetchData(url);
+    },
+
+    /* ── MÉTRICAS (delegado a Meteo) ───────────────────────── */
+    metrics(slopeDir) {
+      return Meteo.calcWindMetrics(this.state.data15, slopeDir ??
+        parseInt($('slope-dir-select')?.value || '180', 10));
+    },
+
+    /* ── EVENTOS ───────────────────────────────────────────── */
+    bindEvents() {
+      const onSlopeChange = debounce(() => {
+        this.state.slope = parseInt($('slope-dir-select')?.value || '180', 10);
+        this.invalidateCache();
+        updateWindComponent();
+        updateFlightStatus();
+      }, 150);
+      $('slope-dir-select')?.addEventListener('change', onSlopeChange);
+
+      /* Botones de zoom — centralizados aquí, sin onclick en HTML */
+      document.querySelectorAll('.zoom-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          App.setZoom(parseInt(btn.dataset.zoom, 10));
+        });
+      });
+    }
+  };
+
+  document.addEventListener('DOMContentLoaded', () => App.init());
+
+  /* ── Registro del Service Worker (PWA) ── */
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js')
+      .then(reg => console.log('[PWA] SW registrado:', reg.scope))
+      .catch(err => console.warn('[PWA] SW no registrado:', err));
+  }
+  /* ============================================================
+     CONEXIÓN A DATOS REALES — Holfuy Madroño vía GitHub Pages
+     ============================================================
+     Lee holfuy_today.json generado por el scraper cada 15 min.
+     Al cargar: rellena data15 con todos los registros del día.
+     Polling:   cada 5 min comprueba si hay dato nuevo e inyecta.
+     ============================================================ */
+  const GITHUB_DATA = 'https://eceronv58.github.io/test-weather/data';
+
+  async function startHolfuyGitHub() {
+    /* ── Carga inicial del día ── */
+    try {
+      const res  = await fetch(GITHUB_DATA + '/holfuy_today.json');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const rows = await res.json();
+
+      if (Array.isArray(rows) && rows.length > 0) {
+        /* Detener motor de demo — ya tenemos datos reales */
+        if (typeof stopLiveDemo === 'function') stopLiveDemo();
+
+        /* Repoblar data15 con datos reales */
+        data15.length = 0;
+        rows.forEach(function(r) { data15.push(r); });
+        App.state.data15 = data15;
+
+        /* Actualizar allHourly para los gráficos */
+        rows.forEach(function(r) {
+          if (!allHourly.find(function(h) { return h.t === r.t && h.ts === r.ts; })) {
+            allHourly.push(r);
+          }
+        });
+
+        /* Reconstruir UI completa */
+        buildHTable('tbl15', data15);
+        buildCharts(App.state.zoom);
+        updateAll();
+
+        /* Actualizar timestamp */
+        var last = data15[data15.length - 1];
+        _lastUpdateHHMM = last.t;
+        _lastUpdateMs   = Date.now();
+        _renderTimestamp();
+
+        console.log('[holfuy] ' + rows.length + ' registros cargados — último: ' + last.t +
+          ' v=' + last.v + ' g=' + last.g + ' d=' + last.d + '°');
+      } else {
+        console.warn('[holfuy] JSON vacío — manteniendo datos estáticos');
+      }
+    } catch(e) {
+      console.warn('[holfuy] No se pudo cargar holfuy_today.json:', e.message);
+      console.info('[holfuy] Usando datos estáticos del archivo');
+    }
+
+    /* ── Polling cada 5 minutos ── */
+    setInterval(async function() {
+      try {
+        /* Cache-busting con timestamp para evitar respuesta cacheada */
+        const res  = await fetch(GITHUB_DATA + '/holfuy_today.json?t=' + Date.now());
+        if (!res.ok) return;
+        const rows = await res.json();
+        if (!Array.isArray(rows) || !rows.length) return;
+
+        var last    = rows[rows.length - 1];
+        var current = data15.length ? data15[data15.length - 1] : null;
+
+        /* Solo inyectar si el timestamp es diferente */
+        if (current && last.t === current.t && last.isoDate === current.isoDate) return;
+
+        App.inject(last);
+        console.log('[holfuy] Nuevo dato: ' + last.t + ' v=' + last.v + ' g=' + last.g);
+      } catch(e) {
+        console.warn('[holfuy] Error en polling:', e.message);
+      }
+    }, 5 * 60 * 1000);
+  }
+
+</script>
+</body>
+</html>
