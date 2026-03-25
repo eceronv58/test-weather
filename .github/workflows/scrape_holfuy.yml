@@ -2,7 +2,7 @@ name: Scrape Holfuy Madroño
 
 on:
   schedule:
-    - cron: '0,15,30,45 * * * *'   # cada 15 minutos
+    - cron: '0,5,10,15 * * * *'   # cada 15 minutos
   workflow_dispatch:                 # botón manual en GitHub
 
 permissions:
