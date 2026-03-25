@@ -1,1 +1,26 @@
+name: Scrape Holfuy Madroño
 
+on:
+  schedule:
+    - cron: '0,15,30,45 * * * *'   # cada 15 minutos
+  workflow_dispatch:                 # botón manual en GitHub
+
+permissions:
+  contents: write                    # necesario para hacer commit
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scrape Holfuy y actualizar datos
+        run: python3 scraper/scrape.py
+
+      - name: Commit y push si hay cambios
+        run: |
+          git config user.name  "HolfuyBot"
+          git config user.email "bot@madrono.local"
+          git add data/holfuy.json data/holfuy_today.json
+          git diff --cached --quiet || git commit -m "datos $(date -u '+%H:%M UTC')"
+          git push
