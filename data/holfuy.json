@@ -2338,5 +2338,17 @@
     "tmp": null,
     "r": 0,
     "src": "holfuy-api"
+  },
+  {
+    "t": "09:07",
+    "isoDate": "2026-04-12",
+    "ts": 1775984820000,
+    "v": 0,
+    "g": 0,
+    "d": 0,
+    "dir": "N",
+    "tmp": null,
+    "r": 0,
+    "src": "holfuy-api"
   }
 ]
